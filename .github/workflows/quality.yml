@@ -1,0 +1,51 @@
+name: Quality gates
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+
+      - name: Rust format
+        run: nix develop --command cargo fmt --all -- --check
+      - name: Rust lints
+        run: nix develop --command cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Rust tests and migrations
+        run: nix develop --command cargo test --workspace --all-targets
+      - name: Rust security audit
+        run: nix shell nixpkgs#cargo nixpkgs#cargo-audit --command cargo audit
+      - name: Dependency licenses and sources
+        run: nix shell nixpkgs#cargo nixpkgs#cargo-deny --command cargo deny check licenses sources
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend security audit
+        working-directory: frontend
+        run: npm audit --audit-level=moderate
+      - name: Frontend tests and coverage
+        working-directory: frontend
+        run: npm run test:coverage
+      - name: Frontend type check and build
+        working-directory: frontend
+        run: npm run build
+      - name: Frontend HTTP boundary
+        run: node scripts/check-frontend-http.mjs
+
+      - name: Extension synthetic tests
+        run: node --experimental-test-coverage --test --test-coverage-lines=80 extension/tests/*.test.mjs
+      - name: API compatibility contract
+        run: node scripts/check-api-contract.mjs

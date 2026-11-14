@@ -1,0 +1,34 @@
+# Extra / Non-essential docs & assets
+extra/
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Node & Frontend
+node_modules/
+dist/
+.svelte-kit/
+coverage/
+
+# Python test artifacts
+__pycache__/
+*.py[cod]
+
+# Databases & local runtime data
+*.db
+*.db-wal
+*.db-shm
+.cache/
+data/
+
+# Direnv & Environment
+.direnv/
+.env
+.env.local
+
+# OS & Editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

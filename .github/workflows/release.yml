@@ -1,0 +1,184 @@
+name: Portable release builds
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+            binary: target/release/mymedia-server
+            archive_extension: tar.gz
+          - platform: windows-x86_64
+            runner: windows-latest
+            binary: target/release/mymedia-server.exe
+            archive_extension: zip
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Resolve release version
+        id: metadata
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            $manifest = Get-Content Cargo.toml -Raw
+            $match = [regex]::Match($manifest, '(?ms)\[workspace\.package\].*?^version\s*=\s*"([^"]+)"')
+            if (-not $match.Success) { throw 'Workspace version not found' }
+            $version = "$($match.Groups[1].Value)-dev.$env:GITHUB_RUN_NUMBER"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Build native server
+        run: cargo build --locked --release -p mymedia-server
+
+      - name: Download verified Linux runtime tools
+        if: matrix.platform == 'linux-x86_64'
+        shell: bash
+        run: .github/scripts/prepare-runtime-linux.sh .release/runtime
+
+      - name: Download verified Windows runtime tools
+        if: matrix.platform == 'windows-x86_64'
+        shell: pwsh
+        run: .github/scripts/prepare-runtime-windows.ps1 -OutputDirectory .release/runtime
+
+      - name: Assemble portable package
+        shell: pwsh
+        run: |
+          node scripts/package-release.mjs `
+            --platform "${{ matrix.platform }}" `
+            --version "${{ steps.metadata.outputs.version }}" `
+            --binary "${{ matrix.binary }}" `
+            --runtime .release/runtime `
+            --output dist
+
+      - name: Smoke-test Linux package
+        if: matrix.platform == 'linux-x86_64'
+        shell: bash
+        run: |
+          package="dist/zmydia-${{ steps.metadata.outputs.version }}-${{ matrix.platform }}"
+          "$package/bin/zmydia-server" --help
+          "$package/lib/mymedia/bin/ffmpeg" -version
+          "$package/lib/mymedia/bin/ffprobe" -version
+          "$package/lib/mymedia/bin/yt-dlp" --version
+          "$package/lib/mymedia/bin/curl" --version
+          export MYMEDIA_DATA_DIR="$RUNNER_TEMP/mymedia-data"
+          export MYMEDIA_CACHE_DIR="$RUNNER_TEMP/mymedia-cache"
+          export MYMEDIA_KEY_PATH="$RUNNER_TEMP/mymedia-master.key"
+          head -c 32 /dev/urandom > "$MYMEDIA_KEY_PATH"
+          PATH=/usr/bin:/bin "$package/bin/zmydia-server" diagnose
+
+      - name: Smoke-test Windows package
+        if: matrix.platform == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          $package = "dist/zmydia-${{ steps.metadata.outputs.version }}-${{ matrix.platform }}"
+          & "$package/bin/zmydia-server.exe" --help
+          & "$package/lib/mymedia/bin/ffmpeg.exe" -version
+          & "$package/lib/mymedia/bin/ffprobe.exe" -version
+          & "$package/lib/mymedia/bin/yt-dlp.exe" --version
+          & "$package/lib/mymedia/bin/curl.exe" --version
+          $env:MYMEDIA_DATA_DIR = Join-Path $env:RUNNER_TEMP 'mymedia-data'
+          $env:MYMEDIA_CACHE_DIR = Join-Path $env:RUNNER_TEMP 'mymedia-cache'
+          $env:MYMEDIA_KEY_PATH = Join-Path $env:RUNNER_TEMP 'mymedia-master.key'
+          $key = New-Object byte[] 32
+          [Security.Cryptography.RandomNumberGenerator]::Fill($key)
+          [IO.File]::WriteAllBytes($env:MYMEDIA_KEY_PATH, $key)
+          & "$package/bin/zmydia-server.exe" diagnose
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged server diagnostic failed' }
+
+      - name: Create Linux archive
+        if: matrix.platform == 'linux-x86_64'
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          package="zmydia-${{ steps.metadata.outputs.version }}-${{ matrix.platform }}"
+          tar -czf "release-assets/${package}.tar.gz" -C dist "$package"
+
+      - name: Create Windows archive
+        if: matrix.platform == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $package = "zmydia-${{ steps.metadata.outputs.version }}-${{ matrix.platform }}"
+          Compress-Archive -Path "dist/$package" -DestinationPath "release-assets/$package.zip" -CompressionLevel Optimal
+
+      - name: Upload portable archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: zmydia-${{ matrix.platform }}
+          path: release-assets/zmydia-*.${{ matrix.archive_extension }}
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v5
+        with:
+          pattern: zmydia-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum zmydia-* > SHA256SUMS
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --generate-notes --title "ZMydia $GITHUB_REF_NAME"
+          fi

@@ -1,0 +1,297 @@
+{
+  "schema_version": 1,
+  "description": "Contrato de compatibilidade das rotas HTTP públicas do ZMydia.",
+  "error": {
+    "error": {
+      "code": "string?",
+      "message": "string",
+      "details": "unknown?"
+    }
+  },
+  "pagination": {
+    "cursor": {
+      "items": "T[]",
+      "next_cursor": "string|null"
+    },
+    "offset": {
+      "items": "T[]",
+      "limit": "number",
+      "offset": "number",
+      "total": "number?"
+    }
+  },
+  "paths": {
+    "/api/auth/csrf": [
+      "GET"
+    ],
+    "/api/auth/login": [
+      "POST"
+    ],
+    "/api/auth/logout": [
+      "POST"
+    ],
+    "/api/auth/recover": [
+      "POST"
+    ],
+    "/api/auth/setup": [
+      "POST"
+    ],
+    "/api/auth/status": [
+      "GET"
+    ],
+    "/api/channels": [
+      "GET"
+    ],
+    "/api/channels/{id}": [
+      "GET"
+    ],
+    "/api/channels/{id}/avatar": [
+      "GET"
+    ],
+    "/api/channels/{id}/mentions": [
+      "GET"
+    ],
+    "/api/channels/{id}/sync": [
+      "POST"
+    ],
+    "/api/channels/sync": [
+      "POST"
+    ],
+    "/api/dashboard": [
+      "GET"
+    ],
+    "/api/diagnostics/capabilities": [
+      "GET"
+    ],
+    "/api/downloads": [
+      "GET",
+      "POST"
+    ],
+    "/api/downloads/{id}": [
+      "DELETE"
+    ],
+    "/api/downloads/{id}/file": [
+      "GET"
+    ],
+    "/api/downloads/probe": [
+      "POST"
+    ],
+    "/api/duplicates": [
+      "GET"
+    ],
+    "/api/duplicates/{id}/approve": [
+      "POST"
+    ],
+    "/api/duplicates/{id}/reject": [
+      "POST"
+    ],
+    "/api/extension/info": [
+      "GET"
+    ],
+    "/api/extension/pairings": [
+      "POST"
+    ],
+    "/api/extension/pairings/{id}/confirm": [
+      "POST"
+    ],
+    "/api/extension/tokens": [
+      "GET",
+      "POST"
+    ],
+    "/api/extension/tokens/{id}": [
+      "DELETE"
+    ],
+    "/api/favorites": [
+      "GET"
+    ],
+    "/api/favorites/{media_id}": [
+      "DELETE",
+      "POST"
+    ],
+    "/api/favorites/{media_id}/toggle": [
+      "POST"
+    ],
+    "/api/feed": [
+      "GET"
+    ],
+    "/api/filesystem/operations": [
+      "GET"
+    ],
+    "/api/filesystem/operations/{id}/discard": [
+      "DELETE"
+    ],
+    "/api/filesystem/operations/{id}/undo": [
+      "POST"
+    ],
+    "/api/health": [
+      "GET"
+    ],
+    "/api/health/live": [
+      "GET"
+    ],
+    "/api/health/ready": [
+      "GET"
+    ],
+    "/api/history": [
+      "DELETE",
+      "GET"
+    ],
+    "/api/history/{id}": [
+      "DELETE"
+    ],
+    "/api/media": [
+      "GET"
+    ],
+    "/api/media/{id}": [
+      "GET"
+    ],
+    "/api/media/{id}/music": [
+      "DELETE",
+      "GET",
+      "PUT"
+    ],
+    "/api/media/{id}/music/playing-now": [
+      "POST"
+    ],
+    "/api/media/{id}/music/recognize": [
+      "POST"
+    ],
+    "/api/media/{id}/music/scrobble": [
+      "POST"
+    ],
+    "/api/media/{id}/notes": [
+      "PUT"
+    ],
+    "/api/media/{id}/related": [
+      "GET"
+    ],
+    "/api/media/{id}/stream": [
+      "GET",
+      "HEAD"
+    ],
+    "/api/media/{id}/subtitles": [
+      "GET"
+    ],
+    "/api/media/{id}/subtitles/{lang}": [
+      "GET"
+    ],
+    "/api/media/{id}/subtitles/download": [
+      "POST"
+    ],
+    "/api/media/{id}/thumbnail": [
+      "GET"
+    ],
+    "/api/metrics": [
+      "GET"
+    ],
+    "/api/music/lookup-mbid": [
+      "GET"
+    ],
+    "/api/music/search": [
+      "GET"
+    ],
+    "/api/organizer/reorganize-all": [
+      "POST"
+    ],
+    "/api/organizer/reorganize-all/preview": [
+      "GET"
+    ],
+    "/api/playback/{media_id}": [
+      "GET",
+      "PUT"
+    ],
+    "/api/playback/{media_id}/engagement": [
+      "POST"
+    ],
+    "/api/playback/{media_id}/scrobble": [
+      "POST"
+    ],
+    "/api/playlists": [
+      "GET",
+      "POST"
+    ],
+    "/api/playlists/{id}": [
+      "DELETE",
+      "GET",
+      "PATCH"
+    ],
+    "/api/playlists/{id}/items": [
+      "POST"
+    ],
+    "/api/playlists/{id}/items/{media_id}": [
+      "DELETE"
+    ],
+    "/api/playlists/{id}/reorder": [
+      "PUT"
+    ],
+    "/api/scans": [
+      "POST"
+    ],
+    "/api/scans/{id}": [
+      "GET"
+    ],
+    "/api/search": [
+      "GET"
+    ],
+    "/api/settings/downloads": [
+      "GET",
+      "PUT"
+    ],
+    "/api/settings/home": [
+      "GET",
+      "PUT"
+    ],
+    "/api/settings/listenbrainz": [
+      "GET",
+      "PUT"
+    ],
+    "/api/settings/listenbrainz/validate": [
+      "POST"
+    ],
+    "/api/settings/recommendation": [
+      "GET",
+      "PUT"
+    ],
+    "/api/settings/subtitles": [
+      "GET",
+      "PUT"
+    ],
+    "/api/settings/youtube": [
+      "GET",
+      "PUT"
+    ],
+    "/api/sources": [
+      "GET",
+      "POST"
+    ],
+    "/api/sources/{id}": [
+      "DELETE",
+      "PATCH"
+    ],
+    "/api/sources/{id}/scan": [
+      "POST"
+    ],
+    "/api/stats/playback": [
+      "GET"
+    ],
+    "/api/subtitles/sync": [
+      "POST"
+    ],
+    "/api/tags": [
+      "GET"
+    ],
+    "/api/user/password": [
+      "PUT"
+    ],
+    "/api/user/profile": [
+      "GET",
+      "PUT"
+    ],
+    "/api/youtube/status": [
+      "GET"
+    ],
+    "/api/youtube/sync": [
+      "POST"
+    ]
+  }
+}

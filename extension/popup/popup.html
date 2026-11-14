@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZMydia Downloader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <header class="popup-header">
+      <div class="brand-row">
+        <img src="../icons/icon-32.png" alt="ZMydia" class="brand-icon">
+        <div class="brand-titles">
+          <strong>ZMydia</strong>
+          <span class="sub">Downloader</span>
+        </div>
+      </div>
+      <div id="statusBadge" class="status-badge connecting">
+        <span class="status-dot"></span>
+        <span id="statusText">Conectando...</span>
+      </div>
+    </header>
+
+    <main class="popup-main">
+      <section class="intro-copy">
+        <strong>Envie vídeos sem sair do YouTube</strong>
+        <p>O ZMydia baixa, organiza e adiciona cada vídeo à sua biblioteca.</p>
+      </section>
+
+      <div id="pairingCard" class="pairing-card">
+        <div class="pairing-card-header">
+          <span class="pairing-title" id="pairingTitle">
+            <span id="pairingIcon" class="pairing-indicator"></span>
+            <span id="pairingLabel">Extensão Não Pareada</span>
+          </span>
+          <button type="button" id="unpairBtn" class="btn-text-danger" style="display: none;">Desconectar</button>
+        </div>
+        <p id="pairingDesc">
+          Conecte esta extensão ao seu ZMydia para começar.
+        </p>
+
+        <!-- Ação para pareamento automático -->
+        <div id="autoPairSection">
+          <button type="button" id="autoPairBtn" class="btn-pair-auto">
+            <span>Conectar ao ZMydia</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Firefox trata acessos de host do Manifest V3 como permissões opcionais. -->
+      <div id="ytPermissionCard" class="permission-card" style="display: none;">
+        <div class="permission-text">
+          <strong>Permissão necessária</strong>
+          <small>Autorize YouTube e o servidor local para exibir o botão e enviar downloads.</small>
+        </div>
+        <button type="button" id="grantYtBtn" class="btn-permit">Autorizar</button>
+      </div>
+
+      <div class="section-group">
+        <label for="serverUrl" class="field-label">Servidor</label>
+        <div class="input-with-btn">
+          <input type="url" id="serverUrl" placeholder="http://127.0.0.1:4173" spellcheck="false" autocomplete="off">
+          <button type="button" id="testBtn" class="btn-subtle" title="Testar Conexão">Testar</button>
+        </div>
+      </div>
+
+      <div class="section-group">
+        <span class="field-label">Preferências de download</span>
+        <div class="grid-2col">
+          <div class="field-item">
+            <label for="defaultFormat" class="sub-label">Formato</label>
+            <select id="defaultFormat" class="select-control">
+              <option value="mkv">MKV</option>
+              <option value="mp4">MP4</option>
+            </select>
+          </div>
+          <div class="field-item">
+            <label for="defaultQuality" class="sub-label">Qualidade</label>
+            <select id="defaultQuality" class="select-control">
+              <option value="best">Melhor (Auto)</option>
+              <option value="1440p">1440p (2K)</option>
+              <option value="1080p">1080p (FHD)</option>
+              <option value="720p">720p (HD)</option>
+              <option value="480p">480p</option>
+              <option value="360p">360p</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-group checkbox-row">
+        <label class="toggle-checkbox-label">
+          <input type="checkbox" id="skipConfirmation">
+          <span class="checkbox-text">
+            <strong>Download direto em 1 clique</strong>
+            <small>Inicia o download direto no vídeo ou short sem abrir o balão.</small>
+          </span>
+        </label>
+      </div>
+
+      <div id="feedbackMessage" class="feedback-msg" style="display: none;"></div>
+    </main>
+
+    <footer class="popup-footer">
+      <button type="button" id="openLibraryBtn" class="btn-open-library">
+        <span>Abrir ZMydia</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+          <polyline points="15 3 21 3 21 9"></polyline>
+          <line x1="10" y1="14" x2="21" y2="3"></line>
+        </svg>
+      </button>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
