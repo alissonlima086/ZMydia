@@ -494,7 +494,13 @@ fn inspect_signed_xpi(path: &Path) -> Result<ExtensionVersion, String> {
     let mut archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
     let has_signature = archive
         .file_names()
-        .any(|name| name.to_ascii_uppercase().starts_with("META-INF/") && !name.ends_with('/'));
+        .try_fold(false, |has_signature, name| {
+            let name = name.map_err(|error| error.to_string())?;
+            Ok::<_, String>(
+                has_signature
+                    || (name.to_ascii_uppercase().starts_with("META-INF/") && !name.ends_with('/')),
+            )
+        })?;
     if !has_signature {
         return Err("Mozilla signature metadata is missing".to_string());
     }
