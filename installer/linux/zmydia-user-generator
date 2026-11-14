@@ -1,0 +1,12 @@
+#!/usr/bin/env sh
+set -eu
+
+normal_dir="${1:?systemd user generator output directory is required}"
+config_home="${XDG_CONFIG_HOME:-${HOME:?HOME is required}/.config}"
+[ -f "$config_home/zmydia/enabled" ] || exit 0
+
+mkdir -p "$normal_dir/default.target.wants" "$normal_dir/timers.target.wants"
+ln -sf /usr/lib/systemd/user/zmydia.service \
+  "$normal_dir/default.target.wants/zmydia.service"
+ln -sf /usr/lib/systemd/user/zmydia-backup.timer \
+  "$normal_dir/timers.target.wants/zmydia-backup.timer"

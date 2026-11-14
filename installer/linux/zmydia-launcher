@@ -1,0 +1,18 @@
+#!/usr/bin/env sh
+set -eu
+
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/zmydia"
+mkdir -p "$config_dir"
+chmod 700 "$config_dir"
+: >"$config_dir/enabled"
+chmod 600 "$config_dir/enabled"
+
+systemctl --user daemon-reload
+systemctl --user start zmydia-backup.timer
+systemctl --user start zmydia.service
+
+url='http://127.0.0.1:4173'
+if command -v xdg-open >/dev/null 2>&1; then
+  exec xdg-open "$url"
+fi
+printf 'ZMydia está em execução. Abra %s no navegador.\n' "$url"

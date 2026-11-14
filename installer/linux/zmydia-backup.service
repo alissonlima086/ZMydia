@@ -1,0 +1,17 @@
+[Unit]
+Description=Create a ZMydia library backup
+After=zmydia.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/zmydia/bin/zmydia-server backup
+Environment="PATH=/usr/lib/zmydia/lib/mymedia/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="MYMEDIA_DATA_DIR=%h/.local/share/zmydia"
+Environment="MYMEDIA_CACHE_DIR=%h/.cache/zmydia"
+Environment="MYMEDIA_FRONTEND_DIR=/usr/lib/zmydia/lib/mymedia/frontend"
+Environment="MYMEDIA_EXTENSION_DIR=/usr/lib/zmydia/lib/mymedia/extension"
+Environment="MYMEDIA_LOG_FORMAT=json"
+EnvironmentFile=-%h/.config/zmydia/zmydia.env
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full

@@ -31,6 +31,8 @@ jobs:
         run: nix shell nixpkgs#cargo nixpkgs#cargo-deny --command cargo deny check licenses sources
       - name: Nix package and module evaluation
         run: nix flake check --no-build
+      - name: Linux installer lint
+        run: nix shell nixpkgs#shellcheck --command shellcheck scripts/install-linux.sh scripts/package-deb.sh scripts/test-linux-installer.sh installer/linux/zmydia-launcher installer/linux/zmydia-user-generator
 
       - name: Install frontend dependencies
         working-directory: frontend

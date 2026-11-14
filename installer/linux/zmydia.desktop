@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ZMydia
+Comment=Biblioteca pessoal de vídeos
+Exec=zmydia
+Icon=zmydia
+Terminal=false
+Categories=AudioVideo;Video;
+StartupNotify=false

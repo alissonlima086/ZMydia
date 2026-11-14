@@ -19,19 +19,27 @@ O servidor é acessível somente no próprio computador por padrão. As pastas c
 
 No Linux e no Windows, o instalador configura o ZMydia como um serviço em segundo plano do usuário. O Linux usa systemd e o Windows usa o Agendador de Tarefas para iniciar o ZMydia automaticamente no login e reiniciá-lo em caso de falha. Ambos incluem FFmpeg, ffprobe, yt-dlp e as demais dependências necessárias.
 
-Para instalar no Linux:
+Em Debian, Ubuntu, Linux Mint e derivados, instale o pacote `.deb` e abra **ZMydia** pelo menu de aplicativos. O primeiro início ativa o serviço e o timer de backup para o usuário atual:
 
 ```bash
-chmod +x zmydia-*-linux-x86_64-installer.run
-./zmydia-*-linux-x86_64-installer.run
+sudo apt install ./zmydia_*_amd64.deb
+```
+
+Em outras distribuições com systemd, use o instalador universal interativo. Ele baixa e verifica o pacote da release, instala sem `sudo` e apaga os arquivos temporários ao terminar:
+
+```bash
+sh zmydia-*-linux-x86_64-installer.sh
 ```
 
 No Windows, execute `zmydia-*-windows-x86_64-installer.exe`. A desinstalação remove o serviço e os arquivos do aplicativo, preservando a biblioteca e a configuração do usuário.
 
-No NixOS, o flake baixa o binário pronto da GitHub Release e fornece `packages.default` e `nixosModules.default`, sem recompilar a aplicação. Atualizações são recebidas com `nix flake update` ou `nix profile upgrade`.
+No NixOS, o flake baixa o binário pronto da GitHub Release e fornece um módulo declarativo, sem recompilar a aplicação. Não use `nix profile install`: importe o módulo, habilite o serviço e atualize o input normalmente com `nix flake update zmydia`.
 
 ```nix
-inputs.zmydia.url = "github:alissonlima086/ZMydia";
+inputs.zmydia = {
+  url = "github:alissonlima086/ZMydia";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
 
 # Em configuration.nix:
 imports = [ inputs.zmydia.nixosModules.default ];
@@ -57,19 +65,27 @@ By default, the server is available only on the local computer. Media folders st
 
 On Linux and Windows, the installer configures ZMydia as a per-user background service. Linux uses systemd, while Windows uses Task Scheduler to start ZMydia automatically at sign-in and restart it after failures. Both include FFmpeg, ffprobe, yt-dlp, and the other required runtime dependencies.
 
-To install on Linux:
+On Debian, Ubuntu, Linux Mint, and derivatives, install the `.deb` package and open **ZMydia** from the application menu. The first launch enables the service and backup timer for the current user:
 
 ```bash
-chmod +x zmydia-*-linux-x86_64-installer.run
-./zmydia-*-linux-x86_64-installer.run
+sudo apt install ./zmydia_*_amd64.deb
+```
+
+On other distributions with systemd, use the interactive universal installer. It downloads and verifies the release package, installs without `sudo`, and removes temporary files when finished:
+
+```bash
+sh zmydia-*-linux-x86_64-installer.sh
 ```
 
 On Windows, run `zmydia-*-windows-x86_64-installer.exe`. Uninstalling removes the background service and application files while preserving the user's library and configuration.
 
-On NixOS, the flake downloads the prebuilt binary from the GitHub Release and provides `packages.default` and `nixosModules.default` without rebuilding the application. Updates are received through `nix flake update` or `nix profile upgrade`.
+On NixOS, the flake downloads the prebuilt binary from the GitHub Release and provides a declarative module without rebuilding the application. Do not use `nix profile install`: import the module, enable the service, and update the input normally with `nix flake update zmydia`.
 
 ```nix
-inputs.zmydia.url = "github:alissonlima086/ZMydia";
+inputs.zmydia = {
+  url = "github:alissonlima086/ZMydia";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
 
 # In configuration.nix:
 imports = [ inputs.zmydia.nixosModules.default ];

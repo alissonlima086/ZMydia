@@ -23,7 +23,7 @@ jobs:
       matrix:
         include:
           - platform: linux-x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
             binary: target/release/mymedia-server
           - platform: windows-x86_64
             runner: windows-latest
@@ -104,6 +104,13 @@ jobs:
           "$package/lib/mymedia/bin/yt-dlp" --version
           "$package/lib/mymedia/bin/curl" --version
           "$package/bin/zmydia-server" service --help
+          highest_glibc="$(readelf --version-info "$package/bin/zmydia-server" | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1)"
+          echo "Highest required glibc symbol: $highest_glibc"
+          maximum_glibc="$(printf '%s\n%s\n' 'GLIBC_2.35' "$highest_glibc" | sort -Vu | tail -1)"
+          if [ "$maximum_glibc" != 'GLIBC_2.35' ]; then
+            echo "Linux server requires a glibc newer than 2.35" >&2
+            exit 1
+          fi
           export MYMEDIA_DATA_DIR="$RUNNER_TEMP/mymedia-data"
           export MYMEDIA_CACHE_DIR="$RUNNER_TEMP/mymedia-cache"
           export MYMEDIA_KEY_PATH="$RUNNER_TEMP/mymedia-master.key"
@@ -129,18 +136,41 @@ jobs:
           & "$package/bin/zmydia-server.exe" diagnose
           if ($LASTEXITCODE -ne 0) { throw 'Packaged server diagnostic failed' }
 
-      - name: Create Linux archive
+      - name: Create Linux packages and installer
         if: matrix.platform == 'linux-x86_64'
         shell: bash
         run: |
           mkdir -p release-assets
           package="zmydia-${{ steps.metadata.outputs.version }}-${{ matrix.platform }}"
           tar -czf "release-assets/${package}.tar.gz" -C dist "$package"
-          installer="release-assets/${package}-installer.run"
-          cp scripts/install-linux.sh "$installer"
-          cat "release-assets/${package}.tar.gz" >> "$installer"
+          archive_sha256="$(sha256sum "release-assets/${package}.tar.gz" | cut -d' ' -f1)"
+          installer="release-assets/${package}-installer.sh"
+          sed \
+            -e "s/__ZMYDIA_VERSION__/${{ steps.metadata.outputs.version }}/g" \
+            -e "s/__ZMYDIA_ARCHIVE_SHA256__/$archive_sha256/g" \
+            scripts/install-linux.sh > "$installer"
           chmod +x "$installer"
           "$installer" --help
+          bash scripts/test-linux-installer.sh "$installer"
+          bash scripts/package-deb.sh \
+            "dist/$package" \
+            "${{ steps.metadata.outputs.version }}" \
+            release-assets
+
+      - name: Smoke-test Debian package
+        if: matrix.platform == 'linux-x86_64'
+        shell: bash
+        run: |
+          deb="release-assets/zmydia_${{ steps.metadata.outputs.version }}_amd64.deb"
+          dpkg-deb --info "$deb"
+          sudo dpkg --install "$deb"
+          /usr/lib/zmydia/bin/zmydia-server --help
+          test -x /usr/bin/zmydia
+          test -f /usr/lib/systemd/user/zmydia.service
+          test -f /usr/share/applications/zmydia.desktop
+          systemd-analyze --user verify zmydia.service zmydia-backup.service zmydia-backup.timer
+          sudo dpkg --remove zmydia
+          test ! -e /usr/lib/zmydia
 
       - name: Install NSIS
         if: matrix.platform == 'windows-x86_64'
@@ -198,7 +228,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zmydia-${{ matrix.platform }}
-          path: release-assets/zmydia-*
+          path: release-assets/zmydia*
           if-no-files-found: error
           retention-days: 14
 
@@ -224,7 +254,7 @@ jobs:
 
       - name: Generate checksums
         working-directory: release-assets
-        run: sha256sum zmydia-* > SHA256SUMS
+        run: sha256sum zmydia* > SHA256SUMS
 
       - name: Create or update GitHub release
         env:
