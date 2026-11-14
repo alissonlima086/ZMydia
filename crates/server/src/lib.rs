@@ -18,6 +18,7 @@ pub mod probe;
 pub mod recommender;
 pub mod scanner;
 pub mod search;
+pub mod service;
 pub mod sources;
 pub mod streaming;
 pub mod subtitles;

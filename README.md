@@ -17,7 +17,23 @@ ZMydia é uma biblioteca pessoal de vídeos, local e privada. Ela organiza víde
 
 O servidor é acessível somente no próprio computador por padrão. As pastas começam em modo somente leitura, e alterações físicas nos arquivos exigem autorização explícita.
 
-Há versões portáteis para Linux e Windows com FFmpeg, ffprobe, yt-dlp e demais dependências incluídas.
+No Linux, o pacote instala o ZMydia como um serviço do usuário gerenciado pelo systemd. No Windows, a distribuição é portátil. Ambos incluem FFmpeg, ffprobe, yt-dlp e as demais dependências necessárias.
+
+Para instalar o pacote Linux extraído:
+
+```bash
+./bin/zmydia-server service install
+```
+
+No NixOS, o flake baixa o binário pronto da GitHub Release e fornece `packages.default` e `nixosModules.default`, sem recompilar a aplicação. Atualizações são recebidas com `nix flake update` ou `nix profile upgrade`.
+
+```nix
+inputs.zmydia.url = "github:alissonlima086/ZMydia";
+
+# Em configuration.nix:
+imports = [ inputs.zmydia.nixosModules.default ];
+services.zmydia.enable = true;
+```
 
 ## English
 
@@ -36,7 +52,23 @@ ZMydia is a private, local-first personal video library. It organizes videos sto
 
 By default, the server is available only on the local computer. Media folders start in read-only mode, and physical file changes require explicit authorization.
 
-Portable builds are available for Linux and Windows with FFmpeg, ffprobe, yt-dlp, and the other runtime dependencies included.
+On Linux, the package installs ZMydia as a systemd-managed user service. The Windows distribution is portable. Both include FFmpeg, ffprobe, yt-dlp, and the other required runtime dependencies.
+
+To install the extracted Linux package:
+
+```bash
+./bin/zmydia-server service install
+```
+
+On NixOS, the flake downloads the prebuilt binary from the GitHub Release and provides `packages.default` and `nixosModules.default` without rebuilding the application. Updates are received through `nix flake update` or `nix profile upgrade`.
+
+```nix
+inputs.zmydia.url = "github:alissonlima086/ZMydia";
+
+# In configuration.nix:
+imports = [ inputs.zmydia.nixosModules.default ];
+services.zmydia.enable = true;
+```
 
 ## License
 

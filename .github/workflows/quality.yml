@@ -29,6 +29,8 @@ jobs:
         run: nix shell nixpkgs#cargo nixpkgs#cargo-audit --command cargo audit
       - name: Dependency licenses and sources
         run: nix shell nixpkgs#cargo nixpkgs#cargo-deny --command cargo deny check licenses sources
+      - name: Nix package and module evaluation
+        run: nix flake check --no-build
 
       - name: Install frontend dependencies
         working-directory: frontend

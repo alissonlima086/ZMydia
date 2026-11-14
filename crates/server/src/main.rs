@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use mymedia_server::{config::Config, db, operations, web};
+use mymedia_server::{config::Config, db, operations, service, web};
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -11,8 +11,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
-    let config = Config::from_env()?;
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if service::handle(&arguments)? {
+        return Ok(());
+    }
+    let config = Config::from_env()?;
     if handle_command(&config, &arguments).await? {
         return Ok(());
     }
@@ -113,7 +116,7 @@ async fn handle_command(
         }
         "account-recover" => {
             let username = arguments.get(1).ok_or(
-                "uso: mymedia-server account-recover <usuario>; defina MYMEDIA_RECOVERY_PASSWORD",
+                "usage: zmydia-server account-recover <username>; set MYMEDIA_RECOVERY_PASSWORD",
             )?;
             let password = std::env::var("MYMEDIA_RECOVERY_PASSWORD")
                 .map_err(|_| "MYMEDIA_RECOVERY_PASSWORD não definida")?;
@@ -125,7 +128,7 @@ async fn handle_command(
             let backup = PathBuf::from(
                 arguments
                     .get(1)
-                    .ok_or("usage: mymedia-server restore <backup.db>")?,
+                    .ok_or("usage: zmydia-server restore <backup.db>")?,
             );
             restore_backup(config, &backup).await?;
             println!("backup restored from {}", backup.display());
@@ -133,7 +136,7 @@ async fn handle_command(
         }
         "--help" | "-h" | "help" => {
             println!(
-                "ZMydia {}\n\nUSAGE:\n  mymedia-server [serve]\n  mymedia-server diagnose\n  mymedia-server backup\n  mymedia-server restore <backup.db>\n  MYMEDIA_RECOVERY_PASSWORD=... mymedia-server account-recover <username>",
+                "ZMydia {}\n\nUSAGE:\n  zmydia-server [serve]\n  zmydia-server diagnose\n  zmydia-server backup\n  zmydia-server restore <backup.db>\n  zmydia-server service <install|status|restart|logs|uninstall>\n  MYMEDIA_RECOVERY_PASSWORD=... zmydia-server account-recover <username>",
                 env!("CARGO_PKG_VERSION")
             );
             Ok(true)

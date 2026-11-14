@@ -46,6 +46,24 @@ async fn marker(database_url: &str) -> String {
     value
 }
 
+async fn database_is_ready(database: &Path) -> bool {
+    if !database.is_file() {
+        return false;
+    }
+    let database_url = format!("sqlite://{}", database.display());
+    let Ok(pool) = SqlitePool::connect(&database_url).await else {
+        return false;
+    };
+    let ready = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='settings'",
+    )
+    .fetch_one(&pool)
+    .await
+    .is_ok_and(|count| count == 1);
+    pool.close().await;
+    ready
+}
+
 #[tokio::test]
 async fn cli_backup_and_restore_preserve_database_key_and_rollback_copy() {
     let root = test_dir();
@@ -65,13 +83,16 @@ async fn cli_backup_and_restore_preserve_database_key_and_rollback_copy() {
     let database = data_dir.join("mymedia.db");
     let key = data_dir.join(".mymedia_master.key");
     for _ in 0..100 {
-        if database.is_file() && key.is_file() {
+        if key.is_file() && database_is_ready(&database).await {
             break;
         }
         assert!(server.try_wait().expect("poll server").is_none());
-        std::thread::sleep(Duration::from_millis(25));
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(database.is_file(), "server did not create database");
+    assert!(
+        database_is_ready(&database).await,
+        "server did not initialize database"
+    );
     assert!(key.is_file(), "server did not create master key");
     server.kill().expect("stop server");
     server.wait().expect("reap server");

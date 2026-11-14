@@ -1,4 +1,4 @@
-name: Portable release builds
+name: Release builds
 
 on:
   workflow_dispatch:
@@ -85,7 +85,7 @@ jobs:
         shell: pwsh
         run: .github/scripts/prepare-runtime-windows.ps1 -OutputDirectory .release/runtime
 
-      - name: Assemble portable package
+      - name: Assemble release package
         shell: pwsh
         run: |
           node scripts/package-release.mjs `
@@ -105,6 +105,7 @@ jobs:
           "$package/lib/mymedia/bin/ffprobe" -version
           "$package/lib/mymedia/bin/yt-dlp" --version
           "$package/lib/mymedia/bin/curl" --version
+          "$package/bin/zmydia-server" service --help
           export MYMEDIA_DATA_DIR="$RUNNER_TEMP/mymedia-data"
           export MYMEDIA_CACHE_DIR="$RUNNER_TEMP/mymedia-cache"
           export MYMEDIA_KEY_PATH="$RUNNER_TEMP/mymedia-master.key"
@@ -146,7 +147,7 @@ jobs:
           $package = "zmydia-${{ steps.metadata.outputs.version }}-${{ matrix.platform }}"
           Compress-Archive -Path "dist/$package" -DestinationPath "release-assets/$package.zip" -CompressionLevel Optimal
 
-      - name: Upload portable archive
+      - name: Upload release archive
         uses: actions/upload-artifact@v4
         with:
           name: zmydia-${{ matrix.platform }}
@@ -162,6 +163,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out default branch
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
       - name: Download release archives
         uses: actions/download-artifact@v5
         with:
@@ -181,4 +187,19 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
           else
             gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --generate-notes --title "ZMydia $GITHUB_REF_NAME"
+          fi
+
+      - name: Update Nix binary release pin
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          archive="release-assets/zmydia-${version}-linux-x86_64.tar.gz"
+          digest="$(sha256sum "$archive" | cut -d' ' -f1)"
+          node -e 'const fs=require("fs"); const path="nix/release.json"; const data=JSON.parse(fs.readFileSync(path)); data.version=process.argv[1]; data.linux_x86_64_sha256=process.argv[2]; fs.writeFileSync(path, JSON.stringify(data, null, 2)+"\n");' "$version" "$digest"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add nix/release.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update Nix package to ${GITHUB_REF_NAME}"
+            git push origin HEAD:main
           fi

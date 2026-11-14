@@ -752,10 +752,10 @@ pub(crate) async fn list_channels(
         conditions
             .push("(instr(lower(c.name), ?) > 0 OR instr(lower(COALESCE(c.handle, '')), ?) > 0)");
     }
-    for _ in &hidden_terms {
-        conditions
-            .push("(instr(lower(c.name), ?) = 0 AND instr(lower(COALESCE(c.handle, '')), ?) = 0)");
-    }
+    conditions.extend(std::iter::repeat_n(
+        "(instr(lower(c.name), ?) = 0 AND instr(lower(COALESCE(c.handle, '')), ?) = 0)",
+        hidden_terms.len(),
+    ));
     if !conditions.is_empty() {
         query.push_str(" WHERE ");
         query.push_str(&conditions.join(" AND "));

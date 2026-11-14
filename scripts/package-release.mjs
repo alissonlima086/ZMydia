@@ -91,12 +91,6 @@ if (isWindows) {
     '@echo off\r\nsetlocal\r\nset "PATH=%~dp0lib\\mymedia\\bin;%PATH%"\r\n"%~dp0bin\\zmydia-server.exe" serve\r\n'
   );
 } else {
-  const launcher = join(packageRoot, 'start-zmydia.sh');
-  await writeFile(
-    launcher,
-    '#!/usr/bin/env sh\nset -eu\nROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nPATH="$ROOT/lib/mymedia/bin:$PATH" exec "$ROOT/bin/zmydia-server" serve\n'
-  );
-  await chmod(launcher, 0o755);
   await chmod(join(appBin, 'zmydia-server'), 0o755);
   for (const command of ['ffmpeg', 'ffprobe', 'yt-dlp', 'curl']) {
     await chmod(join(runtimeBin, command), 0o755);
