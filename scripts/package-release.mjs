@@ -86,10 +86,8 @@ await writeFile(
 );
 
 if (isWindows) {
-  await writeFile(
-    join(packageRoot, 'start-zmydia.cmd'),
-    '@echo off\r\nsetlocal\r\nset "PATH=%~dp0lib\\mymedia\\bin;%PATH%"\r\n"%~dp0bin\\zmydia-server.exe" serve\r\n'
-  );
+  await mkdir(join(assetRoot, 'installer'), { recursive: true });
+  await cp(resolve('scripts/windows-task.ps1'), join(assetRoot, 'installer', 'windows-task.ps1'));
 } else {
   await chmod(join(appBin, 'zmydia-server'), 0o755);
   for (const command of ['ffmpeg', 'ffprobe', 'yt-dlp', 'curl']) {

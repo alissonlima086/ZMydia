@@ -25,11 +25,9 @@ jobs:
           - platform: linux-x86_64
             runner: ubuntu-latest
             binary: target/release/mymedia-server
-            archive_extension: tar.gz
           - platform: windows-x86_64
             runner: windows-latest
             binary: target/release/mymedia-server.exe
-            archive_extension: zip
 
     steps:
       - name: Check out source
@@ -138,20 +136,69 @@ jobs:
           mkdir -p release-assets
           package="zmydia-${{ steps.metadata.outputs.version }}-${{ matrix.platform }}"
           tar -czf "release-assets/${package}.tar.gz" -C dist "$package"
+          installer="release-assets/${package}-installer.run"
+          cp scripts/install-linux.sh "$installer"
+          cat "release-assets/${package}.tar.gz" >> "$installer"
+          chmod +x "$installer"
+          "$installer" --help
 
-      - name: Create Windows archive
+      - name: Install NSIS
+        if: matrix.platform == 'windows-x86_64'
+        shell: pwsh
+        run: choco install nsis --version=3.11 --no-progress -y
+
+      - name: Create Windows installer
         if: matrix.platform == 'windows-x86_64'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release-assets | Out-Null
           $package = "zmydia-${{ steps.metadata.outputs.version }}-${{ matrix.platform }}"
-          Compress-Archive -Path "dist/$package" -DestinationPath "release-assets/$package.zip" -CompressionLevel Optimal
+          $packageDirectory = (Resolve-Path "dist/$package").Path
+          $outputFile = Join-Path (Resolve-Path release-assets).Path "$package-installer.exe"
+          $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) {
+            $makensis = (Get-Command makensis.exe -ErrorAction Stop).Source
+          }
+          $nsisLicense = Join-Path $env:RUNNER_TEMP 'nsis-COPYING.txt'
+          Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/NSIS-Dev/nsis/v311/COPYING' -OutFile $nsisLicense
+          $nsisLicenseHash = (Get-FileHash -Algorithm SHA256 $nsisLicense).Hash.ToLowerInvariant()
+          if ($nsisLicenseHash -ne 'dc0f74a312c08ffc900548a67ae9a3670ed28ad25a3afda1fe0504da16f89361') {
+            throw 'NSIS license checksum mismatch'
+          }
+          Copy-Item $nsisLicense (Join-Path $packageDirectory 'licenses\nsis-COPYING.txt')
+          & $makensis `
+            "/DPACKAGE_DIR=$packageDirectory" `
+            "/DOUTPUT_FILE=$outputFile" `
+            "/DPRODUCT_VERSION=${{ steps.metadata.outputs.version }}" `
+            installer/windows.nsi
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS failed to build the installer' }
 
-      - name: Upload release archive
+      - name: Smoke-test Windows installer
+        if: matrix.platform == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          $installer = (Resolve-Path "release-assets/zmydia-${{ steps.metadata.outputs.version }}-${{ matrix.platform }}-installer.exe").Path
+          $install = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Installer failed with exit code $($install.ExitCode)" }
+          $installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\ZMydia'
+          & (Join-Path $installDirectory 'bin\zmydia-server.exe') --help
+          if ($LASTEXITCODE -ne 0) { throw 'Installed server failed its smoke test' }
+          Get-ScheduledTask -TaskName ZMydia -ErrorAction Stop | Out-Null
+          Get-ScheduledTask -TaskName 'ZMydia Backup' -ErrorAction Stop | Out-Null
+          $uninstall = Start-Process -FilePath (Join-Path $installDirectory 'Uninstall.exe') -ArgumentList '/S' -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "Uninstaller failed with exit code $($uninstall.ExitCode)" }
+          if (Get-ScheduledTask -TaskName ZMydia -ErrorAction SilentlyContinue) {
+            throw 'ZMydia scheduled task remained after uninstall'
+          }
+          if (Get-ScheduledTask -TaskName 'ZMydia Backup' -ErrorAction SilentlyContinue) {
+            throw 'ZMydia backup task remained after uninstall'
+          }
+
+      - name: Upload release installers
         uses: actions/upload-artifact@v4
         with:
           name: zmydia-${{ matrix.platform }}
-          path: release-assets/zmydia-*.${{ matrix.archive_extension }}
+          path: release-assets/zmydia-*
           if-no-files-found: error
           retention-days: 14
 
