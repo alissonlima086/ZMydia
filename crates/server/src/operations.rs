@@ -96,6 +96,7 @@ pub async fn report(config: &Config, pool: Option<&SqlitePool>) -> DiagnosticRep
     );
     capabilities
         .push(command_check("yt-dlp", "MYMEDIA_YTDLP_BIN", "yt-dlp", "--version", false).await);
+    capabilities.push(command_check("deno", "MYMEDIA_DENO_BIN", "deno", "--version", false).await);
     capabilities.push(command_check("curl", "MYMEDIA_CURL_BIN", "curl", "--version", false).await);
 
     let ready = capabilities

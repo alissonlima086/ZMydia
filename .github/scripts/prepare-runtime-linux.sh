@@ -8,6 +8,9 @@ ffmpeg_checksums_url="https://github.com/BtbN/FFmpeg-Builds/releases/download/la
 yt_dlp_version="2026.10.26"
 yt_dlp_asset="yt-dlp_linux"
 yt_dlp_base="https://github.com/yt-dlp/yt-dlp/releases/download/${yt_dlp_version}"
+deno_version="2.9.8"
+deno_asset="deno-x86_64-unknown-linux-gnu.zip"
+deno_base="https://github.com/denoland/deno/releases/download/v${deno_version}"
 curl_version="8.23.0-1"
 curl_asset="curl-linux-x86_64-dev-${curl_version}.tar.xz"
 curl_url="https://github.com/stunnel/static-curl/releases/download/${curl_version}/${curl_asset}"
@@ -43,6 +46,13 @@ curl -fsSL "${yt_dlp_base}/SHA2-256SUMS" -o "${work_dir}/yt-dlp-checksums.sha256
 verify_manifest_entry "${work_dir}/yt-dlp-checksums.sha256" "${yt_dlp_asset}" "${work_dir}/${yt_dlp_asset}"
 install -m755 "${work_dir}/${yt_dlp_asset}" "${output_dir}/bin/yt-dlp"
 
+curl -fsSL "${deno_base}/${deno_asset}" -o "${work_dir}/${deno_asset}"
+curl -fsSL "${deno_base}/${deno_asset}.sha256sum" -o "${work_dir}/deno-checksums.sha256"
+verify_manifest_entry "${work_dir}/deno-checksums.sha256" "${deno_asset}" "${work_dir}/${deno_asset}"
+mkdir "${work_dir}/deno"
+unzip -q "${work_dir}/${deno_asset}" -d "${work_dir}/deno"
+install -m755 "${work_dir}/deno/deno" "${output_dir}/bin/deno"
+
 curl -fsSL "${curl_url}" -o "${work_dir}/${curl_asset}"
 mkdir "${work_dir}/curl"
 tar -xJf "${work_dir}/${curl_asset}" -C "${work_dir}/curl"
@@ -55,14 +65,17 @@ find "${work_dir}/ffmpeg" -maxdepth 3 -type f \( -iname 'copying*' -o -iname 'li
 curl_license_dir="$(find "${work_dir}/curl" -type d -path '*/licenses' -print -quit)"
 cp -R "${curl_license_dir}/." "${output_dir}/licenses/curl/"
 curl -fsSL "https://raw.githubusercontent.com/yt-dlp/yt-dlp/${yt_dlp_version}/LICENSE" -o "${output_dir}/licenses/yt-dlp-UNLICENSE.txt"
+curl -fsSL "https://raw.githubusercontent.com/denoland/deno/v${deno_version}/LICENSE.md" -o "${output_dir}/licenses/deno-MIT.txt"
 
 ffmpeg_version="$("${output_dir}/bin/ffmpeg" -version | sed -n '1s/^ffmpeg version //p')"
 yt_dlp_actual="$("${output_dir}/bin/yt-dlp" --version)"
+deno_actual="$("${output_dir}/bin/deno" --version | sed -n '1s/^deno //p')"
 curl_actual="$("${output_dir}/bin/curl" --version | sed -n '1s/^curl //p' | cut -d' ' -f1)"
 cat > "${output_dir}/versions.json" <<EOF
 {
   "ffmpeg": "${ffmpeg_version}",
   "yt-dlp": "${yt_dlp_actual}",
+  "deno": "${deno_actual}",
   "curl": "${curl_actual}"
 }
 EOF

@@ -91,7 +91,9 @@
               assertion = pkgs.stdenv.hostPlatform.system == "x86_64-linux";
               message = "The prebuilt ZMydia release currently supports x86_64-linux only.";
             }];
-            environment.systemPackages = [ cfg.package ];
+            # Keep Deno available through /run/current-system/sw/bin as a compatibility
+            # fallback for older ZMydia release packages that did not bundle it yet.
+            environment.systemPackages = [ cfg.package pkgs.deno ];
 
             systemd.user.services.zmydia = {
               description = "ZMydia personal video library";
@@ -195,6 +197,7 @@
               openssl
               sqlite
               nodejs_22
+              deno
               ffmpeg
               yt-dlp
               curl

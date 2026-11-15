@@ -48,7 +48,7 @@ const assetRoot = join(packageRoot, 'lib', 'mymedia');
 const runtimeBin = join(assetRoot, 'bin');
 
 await requireFile(binary, 'ZMydia binary');
-for (const command of ['ffmpeg', 'ffprobe', 'yt-dlp', 'curl']) {
+for (const command of ['ffmpeg', 'ffprobe', 'yt-dlp', 'deno', 'curl']) {
   await requireFile(join(runtime, 'bin', `${command}${executableSuffix}`), `bundled ${command}`);
 }
 await requireFile(resolve('frontend/dist/index.html'), 'frontend build');
@@ -94,7 +94,7 @@ if (isWindows) {
   await cp(resolve('scripts/windows-task.ps1'), join(assetRoot, 'installer', 'windows-task.ps1'));
 } else {
   await chmod(join(appBin, 'zmydia-server'), 0o755);
-  for (const command of ['ffmpeg', 'ffprobe', 'yt-dlp', 'curl']) {
+  for (const command of ['ffmpeg', 'ffprobe', 'yt-dlp', 'deno', 'curl']) {
     await chmod(join(runtimeBin, command), 0o755);
   }
 }

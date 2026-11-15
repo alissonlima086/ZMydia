@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -121,6 +121,7 @@ jobs:
           "$package/lib/mymedia/bin/ffmpeg" -version
           "$package/lib/mymedia/bin/ffprobe" -version
           "$package/lib/mymedia/bin/yt-dlp" --version
+          "$package/lib/mymedia/bin/deno" --version
           "$package/lib/mymedia/bin/curl" --version
           "$package/bin/zmydia-server" service --help
           highest_glibc="$(readelf --version-info "$package/bin/zmydia-server" | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1)"
@@ -145,6 +146,7 @@ jobs:
           & "$package/lib/mymedia/bin/ffmpeg.exe" -version
           & "$package/lib/mymedia/bin/ffprobe.exe" -version
           & "$package/lib/mymedia/bin/yt-dlp.exe" --version
+          & "$package/lib/mymedia/bin/deno.exe" --version
           & "$package/lib/mymedia/bin/curl.exe" --version
           $env:MYMEDIA_DATA_DIR = Join-Path $env:RUNNER_TEMP 'mymedia-data'
           $env:MYMEDIA_CACHE_DIR = Join-Path $env:RUNNER_TEMP 'mymedia-cache'
@@ -250,7 +252,7 @@ jobs:
           }
 
       - name: Upload release installers
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zmydia-${{ matrix.platform }}
           path: release-assets/zmydia*
@@ -266,10 +268,10 @@ jobs:
       contents: write
     steps:
       - name: Check out release source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download release archives
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           pattern: zmydia-*
           path: release-assets

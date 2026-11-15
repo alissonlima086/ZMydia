@@ -58,23 +58,23 @@ test('gera manifesto de update assinado com assets exatos', async (context) => {
 
 test('valida a identidade de builds de desenvolvimento e releases tagueadas', async () => {
   const validator = new URL('../validate-release-version.mjs', import.meta.url).pathname;
-  await execFileAsync(process.execPath, [validator, '--version', '0.1.1-dev.42']);
+  await execFileAsync(process.execPath, [validator, '--version', '0.1.2-dev.42']);
 
-  await execFileAsync(process.execPath, [validator, '--version', '0.1.1'], {
+  await execFileAsync(process.execPath, [validator, '--version', '0.1.2'], {
     env: {
       ...process.env,
       GITHUB_REF_TYPE: 'tag',
-      GITHUB_REF_NAME: 'v0.1.1',
+      GITHUB_REF_NAME: 'v0.1.2',
       ZMYDIA_UPDATE_PUBLIC_KEY: Buffer.alloc(32, 9).toString('base64')
     }
   });
 
   await assert.rejects(
-    execFileAsync(process.execPath, [validator, '--version', '0.1.2'], {
+    execFileAsync(process.execPath, [validator, '--version', '0.1.3'], {
       env: {
         ...process.env,
         GITHUB_REF_TYPE: 'tag',
-        GITHUB_REF_NAME: 'v0.1.2',
+        GITHUB_REF_NAME: 'v0.1.3',
         ZMYDIA_UPDATE_PUBLIC_KEY: Buffer.alloc(32, 9).toString('base64')
       }
     }),

@@ -17,7 +17,7 @@ ZMydia é uma biblioteca pessoal de vídeos, local e privada. Ela organiza víde
 
 O servidor é acessível somente no próprio computador por padrão. As pastas começam em modo somente leitura, e alterações físicas nos arquivos exigem autorização explícita.
 
-No Linux e no Windows, o instalador configura o ZMydia como um serviço em segundo plano do usuário. O Linux usa systemd e o Windows usa o Agendador de Tarefas para iniciar o ZMydia automaticamente no login e reiniciá-lo em caso de falha. Ambos incluem FFmpeg, ffprobe, yt-dlp e as demais dependências necessárias.
+No Linux e no Windows, o instalador configura o ZMydia como um serviço em segundo plano do usuário. O Linux usa systemd e o Windows usa o Agendador de Tarefas para iniciar o ZMydia automaticamente no login e reiniciá-lo em caso de falha. Ambos incluem FFmpeg, ffprobe, yt-dlp, Deno e as demais dependências necessárias.
 
 Em Debian, Ubuntu, Linux Mint e derivados, instale o pacote `.deb` e abra **ZMydia** pelo menu de aplicativos. O primeiro início ativa o serviço e o timer de backup para o usuário atual:
 
@@ -63,7 +63,7 @@ ZMydia is a private, local-first personal video library. It organizes videos sto
 
 By default, the server is available only on the local computer. Media folders start in read-only mode, and physical file changes require explicit authorization.
 
-On Linux and Windows, the installer configures ZMydia as a per-user background service. Linux uses systemd, while Windows uses Task Scheduler to start ZMydia automatically at sign-in and restart it after failures. Both include FFmpeg, ffprobe, yt-dlp, and the other required runtime dependencies.
+On Linux and Windows, the installer configures ZMydia as a per-user background service. Linux uses systemd, while Windows uses Task Scheduler to start ZMydia automatically at sign-in and restart it after failures. Both include FFmpeg, ffprobe, yt-dlp, Deno, and the other required runtime dependencies.
 
 On Debian, Ubuntu, Linux Mint, and derivatives, install the `.deb` package and open **ZMydia** from the application menu. The first launch enables the service and backup timer for the current user:
 
