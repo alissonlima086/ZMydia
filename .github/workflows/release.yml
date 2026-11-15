@@ -102,6 +102,8 @@ jobs:
             --output dist
 
       - name: Validate packaged release identity
+        env:
+          ZMYDIA_UPDATE_PUBLIC_KEY: ${{ vars.ZMYDIA_UPDATE_PUBLIC_KEY }}
         shell: pwsh
         run: |
           node scripts/validate-release-version.mjs `
