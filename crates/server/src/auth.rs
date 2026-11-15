@@ -732,7 +732,7 @@ pub(crate) async fn create_pairing_challenge(
     }
     let name = req
         .name
-        .unwrap_or_else(|| "Extensão Firefox".into())
+        .unwrap_or_else(|| "Extensão do navegador".into())
         .trim()
         .chars()
         .take(64)
@@ -742,7 +742,7 @@ pub(crate) async fn create_pairing_challenge(
     }
     let origin = req
         .extension_origin
-        .filter(|origin| origin.starts_with("moz-extension://") && origin.len() <= 128)
+        .filter(|origin| crate::config::is_extension_origin(origin))
         .ok_or((
             StatusCode::BAD_REQUEST,
             "A extensão não respondeu ao desafio de pareamento".into(),
@@ -881,7 +881,7 @@ pub(crate) async fn auth_middleware(
             .headers()
             .get(header::ORIGIN)
             .and_then(|value| value.to_str().ok())
-            .filter(|value| value.starts_with("moz-extension://"))
+            .filter(|value| crate::config::is_extension_origin(value))
             && user.extension_origin.as_deref() != Some(origin)
         {
             return json_error(StatusCode::FORBIDDEN, "Origem da extensão não autorizada");
@@ -903,6 +903,8 @@ pub fn is_public_route(path: &str) -> bool {
             | "/api/extension/info"
             | "/extension/zmydia.xpi"
             | "/extension/mymedia.xpi"
+            | "/extension/zmydia"
+            | "/extension/zmydia.zip"
     ) || !path.starts_with("/api/")
 }
 

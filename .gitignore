@@ -8,6 +8,7 @@ extra/
 # Node & Frontend
 node_modules/
 dist/
+/extension/chrome/
 .svelte-kit/
 coverage/
 

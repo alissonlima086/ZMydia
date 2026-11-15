@@ -1,5 +1,7 @@
 <script lang="ts">
-  let { count = 8, label = 'Carregando vídeos…' }: { count?: number; label?: string } = $props();
+  import { t } from '../i18n/i18n.svelte';
+
+  let { count = 8, label = t('common.videos_loading') }: { count?: number; label?: string } = $props();
 </script>
 
 <section class="media-skeleton" aria-busy="true" aria-label={label}>

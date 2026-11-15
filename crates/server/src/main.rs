@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use mymedia_server::{config::Config, db, operations, service, web};
+use mymedia_server::{config::Config, db, operations, service, updates, web};
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -12,6 +12,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if updates::handle(&arguments)? {
+        return Ok(());
+    }
     if service::handle(&arguments)? {
         return Ok(());
     }
@@ -134,10 +137,14 @@ async fn handle_command(
             println!("backup restored from {}", backup.display());
             Ok(true)
         }
+        "--version" | "-V" => {
+            println!("{}", mymedia_server::version::app_version());
+            Ok(true)
+        }
         "--help" | "-h" | "help" => {
             println!(
-                "ZMydia {}\n\nUSAGE:\n  zmydia-server [serve]\n  zmydia-server diagnose\n  zmydia-server backup\n  zmydia-server restore <backup.db>\n  zmydia-server service <install|status|restart|logs|uninstall>\n  MYMEDIA_RECOVERY_PASSWORD=... zmydia-server account-recover <username>",
-                env!("CARGO_PKG_VERSION")
+                "ZMydia {}\n\nUSAGE:\n  zmydia-server [serve]\n  zmydia-server --version\n  zmydia-server diagnose\n  zmydia-server backup\n  zmydia-server restore <backup.db>\n  zmydia-server service <install|status|restart|logs|uninstall>\n  MYMEDIA_RECOVERY_PASSWORD=... zmydia-server account-recover <username>",
+                mymedia_server::version::app_version()
             );
             Ok(true)
         }

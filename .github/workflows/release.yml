@@ -62,6 +62,11 @@ jobs:
           }
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      - name: Validate release identity
+        env:
+          ZMYDIA_UPDATE_PUBLIC_KEY: ${{ vars.ZMYDIA_UPDATE_PUBLIC_KEY }}
+        run: node scripts/validate-release-version.mjs --version "${{ steps.metadata.outputs.version }}"
+
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
@@ -71,6 +76,9 @@ jobs:
         run: npm run build
 
       - name: Build native server
+        env:
+          ZMYDIA_BUILD_VERSION: ${{ steps.metadata.outputs.version }}
+          ZMYDIA_UPDATE_PUBLIC_KEY: ${{ vars.ZMYDIA_UPDATE_PUBLIC_KEY }}
         run: cargo build --locked --release -p mymedia-server
 
       - name: Download verified Linux runtime tools
@@ -92,6 +100,15 @@ jobs:
             --binary "${{ matrix.binary }}" `
             --runtime .release/runtime `
             --output dist
+
+      - name: Validate packaged release identity
+        shell: pwsh
+        run: |
+          node scripts/validate-release-version.mjs `
+            --version "${{ steps.metadata.outputs.version }}" `
+            --binary "${{ matrix.binary }}" `
+            --package "dist/zmydia-${{ steps.metadata.outputs.version }}-${{ matrix.platform }}" `
+            --platform "${{ matrix.platform }}"
 
       - name: Smoke-test Linux package
         if: matrix.platform == 'linux-x86_64'
@@ -215,6 +232,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Installed server failed its smoke test' }
           Get-ScheduledTask -TaskName ZMydia -ErrorAction Stop | Out-Null
           Get-ScheduledTask -TaskName 'ZMydia Backup' -ErrorAction Stop | Out-Null
+          $upgrade = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
+          if ($upgrade.ExitCode -ne 0) { throw "Silent upgrade failed with exit code $($upgrade.ExitCode)" }
+          $ready = Invoke-RestMethod -Uri 'http://127.0.0.1:4173/api/health/ready' -TimeoutSec 10
+          if ($ready.status -ne 'ready' -or $ready.version -ne '${{ steps.metadata.outputs.version }}') {
+            throw 'Upgraded Windows service did not report the expected ready version'
+          }
           $uninstall = Start-Process -FilePath (Join-Path $installDirectory 'Uninstall.exe') -ArgumentList '/S' -Wait -PassThru
           if ($uninstall.ExitCode -ne 0) { throw "Uninstaller failed with exit code $($uninstall.ExitCode)" }
           if (Get-ScheduledTask -TaskName ZMydia -ErrorAction SilentlyContinue) {
@@ -240,10 +263,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Check out default branch
+      - name: Check out release source
         uses: actions/checkout@v6
-        with:
-          ref: main
 
       - name: Download release archives
         uses: actions/download-artifact@v5
@@ -251,6 +272,17 @@ jobs:
           pattern: zmydia-*
           path: release-assets
           merge-multiple: true
+
+      - name: Generate signed update manifest
+        env:
+          ZMYDIA_UPDATE_SIGNING_KEY: ${{ secrets.ZMYDIA_UPDATE_SIGNING_KEY }}
+          ZMYDIA_UPDATE_PUBLIC_KEY: ${{ vars.ZMYDIA_UPDATE_PUBLIC_KEY }}
+        run: |
+          node scripts/generate-update-manifest.mjs \
+            --assets release-assets \
+            --output release-assets \
+            --version "${GITHUB_REF_NAME#v}" \
+            --min-updater-version 0.1.1
 
       - name: Generate checksums
         working-directory: release-assets
@@ -272,6 +304,8 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           archive="release-assets/zmydia-${version}-linux-x86_64.tar.gz"
           digest="$(sha256sum "$archive" | cut -d' ' -f1)"
+          git fetch origin main
+          git switch --force-create main FETCH_HEAD
           node -e 'const fs=require("fs"); const path="nix/release.json"; const data=JSON.parse(fs.readFileSync(path)); data.version=process.argv[1]; data.linux_x86_64_sha256=process.argv[2]; fs.writeFileSync(path, JSON.stringify(data, null, 2)+"\n");' "$version" "$digest"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

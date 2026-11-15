@@ -515,7 +515,7 @@
                     window.dispatchEvent(new CustomEvent('routechange'));
                   }}
                 >
-                  Ver canal
+                  {t('shorts.view_channel')}
                 </a>
               </div>
             {/if}
@@ -606,8 +606,8 @@
                   type="button"
                   class="yt-top-icon-btn"
                   onclick={() => toggleFullscreen(idx)}
-                  title="Tela cheia"
-                  aria-label="Tela cheia"
+                  title={t('shorts.fullscreen')}
+                  aria-label={t('shorts.fullscreen')}
                 >
                   <span class="material-symbols-outlined">fullscreen</span>
                 </button>
@@ -678,7 +678,7 @@
               >
                 <span class="material-symbols-outlined">{item.is_favorite ? 'favorite' : 'favorite_border'}</span>
               </button>
-              <span class="yt-action-label">{item.is_favorite ? 'Salvo' : 'Gostei'}</span>
+              <span class="yt-action-label">{item.is_favorite ? t('shorts.saved') : t('shorts.like')}</span>
             </div>
 
             <!-- Salvar em Playlist -->
@@ -691,7 +691,7 @@
               >
                 <span class="material-symbols-outlined">playlist_add</span>
               </button>
-              <span class="yt-action-label">Salvar</span>
+              <span class="yt-action-label">{t('common.save')}</span>
             </div>
 
             <!-- Compartilhar / Link -->
@@ -700,11 +700,11 @@
                 type="button"
                 class="yt-action-circle-btn"
                 onclick={() => copyShortLink(item.id)}
-                title={copiedShortId === item.id ? 'Link copiado!' : 'Compartilhar'}
+                title={copiedShortId === item.id ? t('shorts.link_copied') : t('shorts.share')}
               >
                 <span class="material-symbols-outlined">{copiedShortId === item.id ? 'check' : 'share'}</span>
               </button>
-              <span class="yt-action-label">{copiedShortId === item.id ? 'Copiado!' : 'Compartilhar'}</span>
+              <span class="yt-action-label">{copiedShortId === item.id ? t('shorts.copied') : t('shorts.share')}</span>
             </div>
 
             <!-- Som -->
@@ -717,7 +717,7 @@
               >
                 <span class="material-symbols-outlined">{isMuted ? 'volume_off' : 'volume_up'}</span>
               </button>
-              <span class="yt-action-label">Som</span>
+              <span class="yt-action-label">{t('shorts.sound')}</span>
             </div>
           </div>
 

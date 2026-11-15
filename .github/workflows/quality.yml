@@ -51,5 +51,7 @@ jobs:
 
       - name: Extension synthetic tests
         run: node --experimental-test-coverage --test --test-coverage-lines=80 extension/tests/*.test.mjs
+      - name: Release metadata tests
+        run: node --test scripts/tests/*.test.mjs
       - name: API compatibility contract
         run: node scripts/check-api-contract.mjs

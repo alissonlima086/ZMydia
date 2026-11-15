@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Component } from 'svelte';
+  import { t } from '../i18n/i18n.svelte';
   import PageState from './PageState.svelte';
 
   type LoadedComponent = { default: Component<any> };
@@ -7,7 +8,7 @@
   let {
     loader,
     props = {},
-    loadingLabel = 'Carregando página…'
+    loadingLabel = t('common.page_loading')
   }: {
     loader: () => Promise<LoadedComponent>;
     props?: Record<string, any>;
@@ -26,7 +27,7 @@
   <PageState
     kind="error"
     icon="error"
-    title="Não foi possível abrir esta página"
-    description="Atualize a página para tentar novamente."
+    title={t('common.page_load_error')}
+    description={t('common.page_load_error_hint')}
   />
 {/await}

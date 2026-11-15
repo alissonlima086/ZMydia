@@ -44,6 +44,7 @@ pub(crate) struct AppState {
     pub(crate) thumbnails: ThumbnailService,
     pub(crate) youtube: YoutubeWorkerService,
     pub(crate) downloader: DownloadService,
+    pub(crate) updates: crate::updates::UpdateService,
     pub(crate) authorized_roots: Arc<RwLock<Vec<PathBuf>>>,
     pub(crate) crypto: crate::crypto::AppCrypto,
     pub(crate) rate_limiter: crate::auth::RateLimiter,
@@ -85,6 +86,10 @@ impl AppState {
         let queue = ScanQueue::start(pool.clone(), thumbnails.clone(), youtube.clone());
         let watchers = WatcherService::start(pool.clone(), queue.clone());
         let downloader = DownloadService::start(pool.clone(), PathBuf::from("/tmp"), queue.clone());
+        let updates = crate::updates::UpdateService::start(&PathBuf::from(format!(
+            "/tmp/zmydia-update-test-{}",
+            std::process::id()
+        )));
         let crypto = crate::crypto::AppCrypto::from_key_bytes(&[123u8; 32]).unwrap();
         Self {
             pool,
@@ -93,6 +98,7 @@ impl AppState {
             thumbnails,
             youtube,
             downloader,
+            updates,
             authorized_roots: Arc::new(RwLock::new(Vec::new())),
             crypto,
             rate_limiter: crate::auth::RateLimiter::default(),
@@ -100,7 +106,7 @@ impl AppState {
             extension_dir: PathBuf::from("/tmp"),
             diagnostics: crate::operations::DiagnosticReport {
                 status: "ready",
-                version: env!("CARGO_PKG_VERSION"),
+                version: crate::version::app_version(),
                 capabilities: Vec::new(),
             },
             requests: Arc::new(RequestMetrics::default()),
@@ -145,7 +151,7 @@ pub fn router(
     let extension_dir = Path::new("extension");
     let diagnostics = crate::operations::DiagnosticReport {
         status: "ready",
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::version::app_version(),
         capabilities: Vec::new(),
     };
     router_with_runtime(
@@ -176,6 +182,7 @@ pub fn router_with_runtime(
     let queue = ScanQueue::start(pool.clone(), thumbnails.clone(), youtube.clone());
     let watchers = WatcherService::start(pool.clone(), queue.clone());
     let downloader = DownloadService::start(pool.clone(), cache_dir.to_path_buf(), queue.clone());
+    let updates = crate::updates::UpdateService::start(cache_dir);
     let authorized_roots = Arc::new(RwLock::new(Vec::new()));
     let rate_limiter = crate::auth::RateLimiter::default();
 
@@ -189,6 +196,7 @@ pub fn router_with_runtime(
         thumbnails,
         youtube,
         downloader,
+        updates,
         authorized_roots,
         crypto,
         rate_limiter,
@@ -241,6 +249,8 @@ pub fn router_with_runtime(
         )
         .route("/api/dashboard", get(crate::dashboard::get_dashboard_stats))
         .route("/api/extension/info", get(get_extension_info))
+        .route("/extension/zmydia", get(serve_detected_extension))
+        .route("/extension/zmydia.zip", get(serve_chromium_extension))
         .route("/extension/zmydia.xpi", get(serve_extension_xpi))
         .route("/extension/mymedia.xpi", get(serve_extension_xpi))
         .route("/api/organizer/reorganize-all", post(reorganize_all_media))
@@ -290,6 +300,10 @@ pub fn router_with_runtime(
             get(downloader::get_download_settings_endpoint)
                 .put(downloader::update_download_settings_endpoint),
         )
+        .route("/api/updates/status", get(get_update_status))
+        .route("/api/updates/check", post(check_for_updates))
+        .route("/api/updates/download", post(download_update))
+        .route("/api/updates/apply", post(apply_update))
         .route("/api/youtube/sync", post(sync_youtube))
         .route("/api/youtube/status", get(get_youtube_status))
         .route(
@@ -467,6 +481,51 @@ struct ExtensionInfoResponse {
     has_unsigned: bool,
     active_type: Option<String>,
     download_url: Option<String>,
+    detected_browser: String,
+    package_available: bool,
+    package_type: Option<String>,
+    installation_mode: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserFamily {
+    Firefox,
+    Chromium,
+    Unsupported,
+}
+
+impl BrowserFamily {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Firefox => "firefox",
+            Self::Chromium => "chromium",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+fn detect_browser_family(user_agent: Option<&str>) -> BrowserFamily {
+    let Some(user_agent) = user_agent else {
+        return BrowserFamily::Unsupported;
+    };
+    if user_agent.contains("Firefox/") && !user_agent.contains("Seamonkey/") {
+        BrowserFamily::Firefox
+    } else if ["Chrome/", "Chromium/", "Edg/", "OPR/", "Brave/"]
+        .iter()
+        .any(|marker| user_agent.contains(marker))
+    {
+        BrowserFamily::Chromium
+    } else {
+        BrowserFamily::Unsupported
+    }
+}
+
+fn browser_from_headers(headers: &axum::http::HeaderMap) -> BrowserFamily {
+    detect_browser_family(
+        headers
+            .get(header::USER_AGENT)
+            .and_then(|value| value.to_str().ok()),
+    )
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -519,7 +578,7 @@ fn inspect_signed_xpi(path: &Path) -> Result<ExtensionVersion, String> {
     if manifest
         .pointer("/browser_specific_settings/gecko/id")
         .and_then(|value| value.as_str())
-        != Some("mymedia-downloader@local")
+        != Some("zmydia-downloader@local")
     {
         return Err("unexpected extension identifier".to_string());
     }
@@ -555,35 +614,78 @@ fn find_signed_xpi(extension_dir: &Path) -> Option<PathBuf> {
         .map(|(_, path)| path)
 }
 
-async fn get_extension_info(State(state): State<AppState>) -> Json<ExtensionInfoResponse> {
+async fn get_extension_info(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Json<ExtensionInfoResponse> {
     let signed_path = find_signed_xpi(&state.extension_dir);
     let unsigned_path = state.extension_dir.join("unsigned/mymedia.xpi");
+    let chromium_source = state.extension_dir.join("manifest.json");
     let has_signed = signed_path.is_some();
     let has_unsigned = unsigned_path.is_file();
+    let browser = browser_from_headers(&headers);
 
-    let (active_type, download_url) = if has_signed {
-        (
-            Some("signed".to_string()),
-            Some("/extension/zmydia.xpi".to_string()),
-        )
-    } else if has_unsigned {
-        (
-            Some("unsigned".to_string()),
-            Some("/extension/zmydia.xpi".to_string()),
-        )
-    } else {
-        (None, None)
-    };
+    let (active_type, download_url, package_available, package_type, installation_mode) =
+        if browser == BrowserFamily::Chromium && chromium_source.is_file() {
+            (
+                Some("chromium".to_string()),
+                Some("/extension/zmydia".to_string()),
+                true,
+                Some("zip".to_string()),
+                Some("unpacked".to_string()),
+            )
+        } else if browser == BrowserFamily::Firefox && has_signed {
+            (
+                Some("signed".to_string()),
+                Some("/extension/zmydia".to_string()),
+                true,
+                Some("xpi".to_string()),
+                Some("direct".to_string()),
+            )
+        } else if browser == BrowserFamily::Firefox && has_unsigned {
+            (
+                Some("unsigned".to_string()),
+                Some("/extension/zmydia".to_string()),
+                true,
+                Some("xpi".to_string()),
+                Some("direct".to_string()),
+            )
+        } else {
+            (None, None, false, None, None)
+        };
 
     Json(ExtensionInfoResponse {
         has_signed,
         has_unsigned,
         active_type,
         download_url,
+        detected_browser: browser.as_str().to_owned(),
+        package_available,
+        package_type,
+        installation_mode,
     })
 }
 
+async fn serve_detected_extension(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    match browser_from_headers(&headers) {
+        BrowserFamily::Firefox => serve_firefox_extension(&state).await,
+        BrowserFamily::Chromium => serve_chromium_package(&state).await,
+        BrowserFamily::Unsupported => (
+            StatusCode::BAD_REQUEST,
+            "Browser não suportado. Use Firefox ou um navegador baseado em Chromium.",
+        )
+            .into_response(),
+    }
+}
+
 async fn serve_extension_xpi(State(state): State<AppState>) -> Response {
+    serve_firefox_extension(&state).await
+}
+
+async fn serve_firefox_extension(state: &AppState) -> Response {
     let signed_path = find_signed_xpi(&state.extension_dir);
     let unsigned_path = state.extension_dir.join("unsigned/mymedia.xpi");
 
@@ -627,10 +729,154 @@ async fn serve_extension_xpi(State(state): State<AppState>) -> Response {
     }
 }
 
+async fn serve_chromium_extension(State(state): State<AppState>) -> Response {
+    serve_chromium_package(&state).await
+}
+
+async fn serve_chromium_package(state: &AppState) -> Response {
+    let directory = state.extension_dir.clone();
+    let bytes =
+        match tokio::task::spawn_blocking(move || package_chromium_extension(&directory)).await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(error)) => {
+                tracing::error!(%error, "failed to package Chromium extension");
+                return (StatusCode::NOT_FOUND, error).into_response();
+            }
+            Err(error) => {
+                tracing::error!(%error, "Chromium extension packaging task failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Falha ao preparar a extensão Chromium".to_owned(),
+                )
+                    .into_response();
+            }
+        };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/zip")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"zmydia-chromium.zip\"",
+        )
+        .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Falha ao entregar a extensão Chromium",
+            )
+                .into_response()
+        })
+}
+
+fn package_chromium_extension(directory: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Cursor;
+    let manifest = directory.join("manifest.json");
+    if !manifest.is_file() {
+        return Err("Pacote Chromium não está disponível nesta instalação".to_owned());
+    }
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    let manifest_object = manifest
+        .as_object_mut()
+        .ok_or_else(|| "Manifesto da extensão é inválido".to_owned())?;
+    manifest_object.remove("browser_specific_settings");
+    manifest_object.insert(
+        "background".to_owned(),
+        serde_json::json!({ "service_worker": "service-worker.js" }),
+    );
+    if let Some(scripts) = manifest_object
+        .get_mut("content_scripts")
+        .and_then(|value| value.as_array_mut())
+    {
+        for script in scripts {
+            if let Some(files) = script.get_mut("js").and_then(|value| value.as_array_mut()) {
+                files.insert(0, serde_json::Value::String("compat.js".to_owned()));
+            }
+        }
+    }
+
+    let cursor = Cursor::new(Vec::new());
+    let mut archive = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+    for child in ["background", "content", "icons", "popup"] {
+        let source = directory.join(child);
+        for entry in walkdir::WalkDir::new(&source).follow_links(false) {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(directory)
+                .map_err(|error| error.to_string())?;
+            let name = relative.to_string_lossy().replace('\\', "/");
+            let mut contents = std::fs::read(entry.path()).map_err(|error| error.to_string())?;
+            if name == "popup/popup.html" {
+                let popup = String::from_utf8(contents).map_err(|error| error.to_string())?;
+                let transformed = popup.replace(
+                    "  <script src=\"popup.js\"></script>",
+                    "  <script src=\"../compat.js\"></script>\n  <script src=\"popup.js\"></script>",
+                );
+                if transformed == popup {
+                    return Err("Não foi possível adaptar o popup para Chromium".to_owned());
+                }
+                contents = transformed.into_bytes();
+            }
+            add_zip_file(&mut archive, &name, &contents, options)?;
+        }
+    }
+    let manifest = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?
+    );
+    add_zip_file(&mut archive, "manifest.json", manifest.as_bytes(), options)?;
+    add_zip_file(
+        &mut archive,
+        "compat.js",
+        b"globalThis.browser ??= globalThis.chrome;\n",
+        options,
+    )?;
+    add_zip_file(
+        &mut archive,
+        "service-worker.js",
+        b"globalThis.browser = globalThis.chrome;\nimportScripts('background/background.js');\n",
+        options,
+    )?;
+    add_zip_file(
+        &mut archive,
+        "COMO-INSTALAR.txt",
+        b"Abra chrome://extensions, ative o Modo do desenvolvedor e escolha Carregar sem compactacao. Selecione esta pasta extraida.\n",
+        options,
+    )?;
+    archive
+        .finish()
+        .map(|cursor| cursor.into_inner())
+        .map_err(|error| error.to_string())
+}
+
+fn add_zip_file(
+    archive: &mut zip::ZipWriter<std::io::Cursor<Vec<u8>>>,
+    name: &str,
+    contents: &[u8],
+    options: zip::write::SimpleFileOptions,
+) -> Result<(), String> {
+    use std::io::Write;
+    archive
+        .start_file(name, options)
+        .map_err(|error| error.to_string())?;
+    archive
+        .write_all(contents)
+        .map_err(|error| error.to_string())
+}
+
 async fn liveness() -> Json<Liveness> {
     Json(Liveness {
         status: "ok",
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::version::app_version(),
     })
 }
 
@@ -647,7 +893,7 @@ async fn readiness(State(state): State<AppState>) -> Response {
     let body = serde_json::json!({
         "status": if ready { "ready" } else { "not_ready" },
         "database": if database_ok { "ok" } else { "error" },
-        "version": env!("CARGO_PKG_VERSION")
+        "version": crate::version::app_version()
     });
     (
         if ready {
@@ -925,7 +1171,7 @@ fn is_allowed_origin(origin: &HeaderValue, security: &crate::config::SecurityCon
     let Ok(origin_str) = origin.to_str() else {
         return false;
     };
-    if origin_str.starts_with("moz-extension://") {
+    if crate::config::is_extension_origin(origin_str) {
         return security
             .extension_origins
             .iter()
@@ -945,7 +1191,7 @@ async fn is_allowed_origin_for_state(origin: &HeaderValue, state: &AppState) -> 
     let Ok(origin) = origin.to_str() else {
         return false;
     };
-    if !origin.starts_with("moz-extension://") || origin.len() > 128 {
+    if !crate::config::is_extension_origin(origin) {
         return false;
     }
     sqlx::query_scalar::<_, i64>(
@@ -1048,6 +1294,43 @@ async fn sync_youtube(
 
 async fn get_youtube_status(State(state): State<AppState>) -> Json<YoutubeWorkerStatus> {
     Json(state.youtube.get_status().await)
+}
+
+async fn get_update_status(State(state): State<AppState>) -> Json<crate::updates::UpdateStatus> {
+    Json(state.updates.status().await)
+}
+
+async fn check_for_updates(
+    State(state): State<AppState>,
+) -> Result<Json<crate::updates::UpdateStatus>, (StatusCode, String)> {
+    state
+        .updates
+        .check()
+        .await
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))
+}
+
+async fn download_update(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<crate::updates::UpdateStatus>), (StatusCode, String)> {
+    state
+        .updates
+        .start_download()
+        .await
+        .map(|status| (StatusCode::ACCEPTED, Json(status)))
+        .map_err(|error| (StatusCode::CONFLICT, error))
+}
+
+async fn apply_update(
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<crate::updates::UpdateStatus>), (StatusCode, String)> {
+    state
+        .updates
+        .apply()
+        .await
+        .map(|status| (StatusCode::ACCEPTED, Json(status)))
+        .map_err(|error| (StatusCode::CONFLICT, error))
 }
 
 async fn reorganize_all_media(
@@ -1251,7 +1534,112 @@ mod tests {
         let extension_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extension");
         let selected = find_signed_xpi(&extension_dir).expect("signed extension package");
         let version = inspect_signed_xpi(&selected).expect("valid signed extension package");
-        assert!(version >= ExtensionVersion([1, 2, 4, 0]));
+        assert!(version >= ExtensionVersion([0, 1, 0, 0]));
+    }
+
+    #[test]
+    fn detects_firefox_and_chromium_browser_families() {
+        assert_eq!(
+            detect_browser_family(Some("Mozilla/5.0 Firefox/145.0")),
+            BrowserFamily::Firefox
+        );
+        assert_eq!(
+            detect_browser_family(Some("Mozilla/5.0 Chrome/142.0 Safari/537.36")),
+            BrowserFamily::Chromium
+        );
+        assert_eq!(
+            detect_browser_family(Some("Mozilla/5.0 Chrome/142.0 Edg/142.0")),
+            BrowserFamily::Chromium
+        );
+        assert_eq!(
+            detect_browser_family(Some("Mozilla/5.0 Version/18.0 Safari/605.1.15")),
+            BrowserFamily::Unsupported
+        );
+    }
+
+    #[test]
+    fn packages_the_chromium_extension_as_a_zip() {
+        use std::io::Read;
+        let extension_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extension");
+        let bytes = package_chromium_extension(&extension_dir).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut manifest = String::new();
+        archive
+            .by_name("manifest.json")
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        assert_eq!(manifest["name"], "ZMydia Downloader");
+        assert_eq!(
+            manifest["background"]["service_worker"],
+            "service-worker.js"
+        );
+        assert!(manifest.get("browser_specific_settings").is_none());
+    }
+
+    #[tokio::test]
+    async fn serves_the_package_selected_from_the_browser_user_agent() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let mut state = AppState::for_test(pool);
+        state.extension_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extension");
+        let app = Router::new()
+            .route("/api/extension/info", get(get_extension_info))
+            .route("/extension/zmydia", get(serve_detected_extension))
+            .with_state(state);
+
+        let chrome_info = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/extension/info")
+                    .header(header::USER_AGENT, "Mozilla/5.0 Chrome/142.0 Safari/537.36")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let info: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(chrome_info.into_body(), 16 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(info["detected_browser"], "chromium");
+        assert_eq!(info["package_type"], "zip");
+
+        let chrome_package = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/extension/zmydia")
+                    .header(header::USER_AGENT, "Mozilla/5.0 Chrome/142.0 Safari/537.36")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(chrome_package.status(), StatusCode::OK);
+        assert_eq!(
+            chrome_package.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/zip"
+        );
+
+        let firefox_package = app
+            .oneshot(
+                Request::builder()
+                    .uri("/extension/zmydia")
+                    .header(header::USER_AGENT, "Mozilla/5.0 Firefox/145.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(firefox_package.status(), StatusCode::OK);
+        assert_eq!(
+            firefox_package.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/x-xpinstall"
+        );
     }
 
     #[tokio::test]
@@ -1632,7 +2020,10 @@ mod tests {
         let pool = crate::db::connect("sqlite::memory:").await.unwrap();
         let mut state = AppState::for_test(pool);
         state.csrf_token = "csrf_ext_test".to_owned();
-        state.security.extension_origins = vec!["moz-extension://test-uuid-1234".to_owned()];
+        state.security.extension_origins = vec![
+            "moz-extension://test-uuid-1234".to_owned(),
+            "chrome-extension://abcdefghijklmnop".to_owned(),
+        ];
 
         let app = Router::new()
             .route("/api/extension/info", get(get_extension_info))
@@ -1671,6 +2062,23 @@ mod tests {
                 .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
                 .unwrap(),
             "moz-extension://test-uuid-1234"
+        );
+
+        let chrome_options_req = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/downloads")
+            .header(header::HOST, "127.0.0.1:4173")
+            .header(header::ORIGIN, "chrome-extension://abcdefghijklmnop")
+            .body(Body::empty())
+            .unwrap();
+        let chrome_res = app.clone().oneshot(chrome_options_req).await.unwrap();
+        assert_eq!(chrome_res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            chrome_res
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "chrome-extension://abcdefghijklmnop"
         );
 
         // 3. Preflight OPTIONS from evil.com -> 403 Forbidden

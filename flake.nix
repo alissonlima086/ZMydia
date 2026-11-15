@@ -44,6 +44,7 @@
           postFixup = ''
             wrapProgram $out/bin/zmydia-server \
               --prefix PATH : $out/lib/mymedia/bin \
+              --set MYMEDIA_INSTALLATION_METHOD nix \
               --set MYMEDIA_FRONTEND_DIR $out/lib/mymedia/frontend \
               --set MYMEDIA_EXTENSION_DIR $out/lib/mymedia/extension
           '';
@@ -62,6 +63,7 @@
           cfg = config.services.zmydia;
           commonEnvironment = [
             "PATH=${cfg.package}/lib/mymedia/bin:/run/current-system/sw/bin"
+            "MYMEDIA_INSTALLATION_METHOD=nix"
             "MYMEDIA_DATA_DIR=%h/.local/share/zmydia"
             "MYMEDIA_CACHE_DIR=%h/.cache/zmydia"
             "MYMEDIA_FRONTEND_DIR=${cfg.package}/lib/mymedia/frontend"

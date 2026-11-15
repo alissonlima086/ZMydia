@@ -103,7 +103,7 @@ pub async fn report(config: &Config, pool: Option<&SqlitePool>) -> DiagnosticRep
         .all(|item| !item.required || item.status == "ok");
     DiagnosticReport {
         status: if ready { "ready" } else { "not_ready" },
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::version::app_version(),
         capabilities,
     }
 }
@@ -344,6 +344,9 @@ mod tests {
             cache_dir: root.join("cache"),
             key_path: root.join("master.key"),
             backup_dir: root.join("backups"),
+            installation: crate::installation::InstallationInfo::current(
+                crate::installation::InstallationMethod::Development,
+            ),
             security: SecurityConfig::default(),
         };
 

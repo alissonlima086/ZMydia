@@ -48,17 +48,17 @@
       {/if}
     </div>
     <span class="track-artist">{track.artist_name}</span>
-    {#if track.release_name}<span class="track-release">Álbum: {track.release_name}</span>{/if}
+    {#if track.release_name}<span class="track-release">{t('music.album_label', { album: track.release_name })}</span>{/if}
     {#if track.last_scrobbled_at}
-      <span class="scrobble-date">Último scrobble: {formatScrobbleDate(track.last_scrobbled_at)}</span>
+      <span class="scrobble-date">{t('music.last_scrobble', { date: formatScrobbleDate(track.last_scrobbled_at) })}</span>
     {/if}
   </div>
   <div class="current-track-actions">
-    <button type="button" class="action-btn scrobble-now-btn" disabled={busy} onclick={onScrobble} title="Registrar agora na sua conta do ListenBrainz">
+    <button type="button" class="action-btn scrobble-now-btn" disabled={busy} onclick={onScrobble} title={t('music.scrobble_tip')}>
       <span class="material-symbols-outlined">send</span>
       <span>{t('music.scrobble_now')}</span>
     </button>
-    <button type="button" class="action-btn unlink-btn" disabled={busy} onclick={onUnlink} title="Desvincular esta música">
+    <button type="button" class="action-btn unlink-btn" disabled={busy} onclick={onUnlink} title={t('music.unlink_tip')}>
       <span class="material-symbols-outlined">link_off</span>
       <span>{t('music.unlink')}</span>
     </button>

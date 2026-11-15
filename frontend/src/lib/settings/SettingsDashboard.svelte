@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { t } from '../i18n/i18n.svelte';
   import Button from '../ui/Button.svelte';
   import ConfirmDialog from '../ui/ConfirmDialog.svelte';
   import Notice from '../ui/Notice.svelte';
   import PageState from '../ui/PageState.svelte';
   import SettingGroup from '../ui/SettingGroup.svelte';
-  import { type DashboardStats, formatBytes, formatDuration, messageFrom, request } from './types';
+  import { type DashboardStats, type UpdateStatus, formatBytes, formatDuration, messageFrom, request } from './types';
 
   type ReorganizePreview = {
     moves: Array<{ media_id: number; current_path: string; target_path: string; size_bytes: number; collision: boolean }>;
@@ -23,8 +23,73 @@
   let loadingPreview = $state(false);
   let organizingAll = $state(false);
   let showExecuteConfirm = $state(false);
+  let updateStatus = $state<UpdateStatus | null>(null);
+  let updateBusy = $state(false);
+  let updateTimer: number | null = null;
 
-  onMount(() => void loadStats());
+  onMount(() => {
+    void loadStats();
+    void loadUpdateStatus();
+  });
+  onDestroy(() => {
+    if (updateTimer !== null) window.clearTimeout(updateTimer);
+  });
+
+  function scheduleUpdatePoll() {
+    if (updateTimer !== null) window.clearTimeout(updateTimer);
+    updateTimer = window.setTimeout(() => void loadUpdateStatus(), 750);
+  }
+
+  async function loadUpdateStatus() {
+    try {
+      updateStatus = await request<UpdateStatus>('/api/updates/status');
+      if (updateStatus.phase === 'downloading' || updateStatus.phase === 'checking' || updateStatus.phase === 'applying') scheduleUpdatePoll();
+    } catch (error) {
+      if (updateStatus?.phase === 'applying') {
+        scheduleUpdatePoll();
+      } else {
+        errorMessage = messageFrom(error);
+      }
+    }
+  }
+
+  async function checkUpdates() {
+    updateBusy = true;
+    try {
+      updateStatus = await request<UpdateStatus>('/api/updates/check', { method: 'POST' });
+    } catch (error) {
+      errorMessage = messageFrom(error);
+      await loadUpdateStatus();
+    } finally {
+      updateBusy = false;
+    }
+  }
+
+  async function downloadUpdate() {
+    updateBusy = true;
+    try {
+      updateStatus = await request<UpdateStatus>('/api/updates/download', { method: 'POST' });
+      scheduleUpdatePoll();
+    } catch (error) {
+      errorMessage = messageFrom(error);
+    } finally {
+      updateBusy = false;
+    }
+  }
+
+  async function applyUpdate() {
+    updateBusy = true;
+    errorMessage = null;
+    try {
+      updateStatus = await request<UpdateStatus>('/api/updates/apply', { method: 'POST' });
+      scheduleUpdatePoll();
+    } catch (error) {
+      errorMessage = messageFrom(error);
+      await loadUpdateStatus();
+    } finally {
+      updateBusy = false;
+    }
+  }
 
   async function loadStats() {
     loading = true;
@@ -127,6 +192,70 @@
       </div>
     </SettingGroup>
 
+    {#if updateStatus}
+      <SettingGroup title={t('settings.dashboard.update_title')} description={t('settings.dashboard.update_desc')}>
+        <div class="update-panel">
+          <div class="update-summary">
+            <div>
+              <strong>{t('settings.dashboard.current_version', { version: updateStatus.current_version })}</strong>
+              <small>
+                {#if updateStatus.phase === 'available'}
+                  {t('settings.dashboard.update_available', { version: updateStatus.available_version ?? '' })}
+                {:else if updateStatus.phase === 'downloading'}
+                  {t('settings.dashboard.update_downloading', { percent: Math.round(updateStatus.progress_percent) })}
+                {:else if updateStatus.phase === 'downloaded'}
+                  {t('settings.dashboard.update_downloaded', { version: updateStatus.available_version ?? '' })}
+                {:else if updateStatus.phase === 'applying'}
+                  {t('settings.dashboard.update_applying')}
+                {:else if updateStatus.phase === 'installed'}
+                  {t('settings.dashboard.update_installed', { version: updateStatus.current_version })}
+                {:else if updateStatus.phase === 'rolled_back'}
+                  {t('settings.dashboard.update_rolled_back')}
+                {:else if updateStatus.phase === 'up_to_date'}
+                  {t('settings.dashboard.update_current')}
+                {:else if updateStatus.phase === 'unsupported'}
+                  {t('settings.dashboard.update_external')}
+                {:else if updateStatus.phase === 'error'}
+                  {updateStatus.error_message ?? t('common.operation_failed')}
+                {:else}
+                  {t('settings.dashboard.update_not_checked')}
+                {/if}
+              </small>
+            </div>
+            <div class="update-actions">
+              {#if updateStatus.notes_url && updateStatus.phase !== 'idle'}
+                <a class="update-notes" href={updateStatus.notes_url} target="_blank" rel="noopener noreferrer">{t('settings.dashboard.release_notes')}</a>
+              {/if}
+              {#if updateStatus.phase === 'available' && updateStatus.can_download}
+                <Button size="sm" variant="primary" onclick={downloadUpdate} disabled={updateBusy}>{t('settings.dashboard.download_update')}</Button>
+              {:else if updateStatus.phase === 'downloaded' && updateStatus.can_self_update}
+                <Button size="sm" variant="primary" onclick={applyUpdate} disabled={updateBusy}>{t('settings.dashboard.install_update')}</Button>
+              {:else if updateStatus.phase !== 'downloading' && updateStatus.phase !== 'applying' && updateStatus.phase !== 'unsupported'}
+                <Button size="sm" variant="secondary" onclick={checkUpdates} disabled={updateBusy || updateStatus.phase === 'checking'}>{t('settings.dashboard.check_updates')}</Button>
+              {/if}
+            </div>
+          </div>
+          {#if updateStatus.phase === 'downloading'}
+            <progress max="100" value={updateStatus.progress_percent} aria-label={t('settings.dashboard.update_progress')}></progress>
+            <small>{formatBytes(updateStatus.downloaded_bytes)} / {formatBytes(updateStatus.total_bytes)}</small>
+          {/if}
+          {#if !updateStatus.can_self_update}
+            <Notice tone="info">
+              {#if updateStatus.installation_method === 'nix'}
+                {t('settings.dashboard.update_instruction_nix')}
+              {:else if updateStatus.installation_method === 'debian'}
+                {t('settings.dashboard.update_instruction_debian', { version: updateStatus.available_version ?? '…' })}
+              {:else if updateStatus.installation_method === 'portable'}
+                {t('settings.dashboard.update_instruction_portable')}
+              {:else if updateStatus.installation_method === 'development'}
+                {t('settings.dashboard.update_instruction_development')}
+              {/if}
+            </Notice>
+          {/if}
+        </div>
+      </SettingGroup>
+    {/if}
+
     <SettingGroup
       title={t('settings.dashboard.organization_title')}
       description={t('settings.dashboard.organization_desc')}
@@ -179,10 +308,19 @@
   .status-dot { width: 9px; height: 9px; border-radius: var(--radius-full); background: var(--success); }
   .status-dot.warning { background: var(--warning); }
   .organizer-panel { display: grid; gap: var(--space-3); padding: var(--space-4); }
+  .update-panel { display: grid; gap: var(--space-2); padding: var(--space-4); }
+  .update-summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
+  .update-summary > div:first-child { display: grid; gap: var(--space-1); }
+  .update-summary small { color: var(--text-muted); }
+  .update-actions { display: flex; align-items: center; gap: var(--space-3); }
+  .update-notes { color: var(--accent); font: var(--type-label); }
+  progress { width: 100%; accent-color: var(--accent); }
   .organizer-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
   @media (max-width: 680px) {
     .dashboard-summary { grid-template-columns: 1fr; }
     .dashboard-metric + .dashboard-metric { border-top: 1px solid var(--border-subtle); border-left: 0; }
     .organizer-actions { align-items: stretch; flex-direction: column; }
+    .update-summary { align-items: stretch; flex-direction: column; }
+    .update-actions { justify-content: space-between; }
   }
 </style>

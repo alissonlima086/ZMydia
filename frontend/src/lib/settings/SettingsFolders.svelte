@@ -72,7 +72,7 @@
     try {
       const result = await request<{ source: MediaSource }>('/api/sources', { method: 'POST', body: JSON.stringify({ path: path.trim(), recursive, mode }) });
       sources = [...sources, result.source]; persistOrder(); path = '';
-      showFeedback('Pasta adicionada. A varredura inicial foi agendada.');
+      showFeedback(t('settings.folders.source_added'));
       await refreshSources(false);
     } catch (error) { showFeedback(messageFrom(error), 'error'); }
     finally { submitting = false; }
@@ -82,20 +82,20 @@
     savingDownloadSettings = true;
     try {
       const response = await apiFetch('/api/settings/downloads', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target_source_id, preferred_container }) });
-      if (!response.ok) throw new Error('Não foi possível salvar o destino de downloads.');
-      downloadSettings = await response.json(); showFeedback('Preferências de download atualizadas.');
+      if (!response.ok) throw new Error(t('settings.folders.download_save_error'));
+      downloadSettings = await response.json(); showFeedback(t('settings.folders.download_saved'));
     } catch (error) { showFeedback(messageFrom(error), 'error'); }
     finally { savingDownloadSettings = false; }
   }
 
   async function scanSource(source: MediaSource) {
     actionId = source.id;
-    try { await request(`/api/sources/${source.id}/scan`, { method: 'POST' }); showFeedback(`Varredura iniciada em “${source.path}”.`); await refreshSources(false); }
+    try { await request(`/api/sources/${source.id}/scan`, { method: 'POST' }); showFeedback(t('settings.folders.scan_started', { path: source.path })); await refreshSources(false); }
     catch (error) { showFeedback(messageFrom(error), 'error'); } finally { actionId = null; }
   }
   async function scanAllSources() {
     scanningAll = true;
-    try { await request('/api/scans', { method: 'POST' }); showFeedback('Varredura iniciada nas pastas ativas.'); await refreshSources(false); }
+    try { await request('/api/scans', { method: 'POST' }); showFeedback(t('settings.folders.scan_all_started')); await refreshSources(false); }
     catch (error) { showFeedback(messageFrom(error), 'error'); } finally { scanningAll = false; }
   }
   async function toggleSource(source: MediaSource) {
@@ -103,7 +103,7 @@
     try {
       await request(`/api/sources/${source.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !source.enabled }) });
       if (source.enabled && downloadSettings.target_source_id === source.id) await updateDownloadSettings(null);
-      await refreshSources(false); showFeedback(`Pasta ${source.enabled ? 'desativada' : 'ativada'}.`);
+      await refreshSources(false); showFeedback(t(source.enabled ? 'settings.folders.source_disabled' : 'settings.folders.source_enabled'));
     } catch (error) { showFeedback(messageFrom(error), 'error'); } finally { actionId = null; }
   }
   async function setMode(source: MediaSource, nextMode: 'read_only' | 'managed') {
@@ -120,20 +120,20 @@
       await request(`/api/sources/${source.id}`, { method: 'DELETE' });
       sources = sources.filter((item) => item.id !== source.id); persistOrder();
       if (downloadSettings.target_source_id === source.id) await updateDownloadSettings(null);
-      showFeedback('Pasta removida do catálogo. Nenhum arquivo foi apagado.');
+      showFeedback(t('settings.folders.source_removed'));
     } catch (error) { showFeedback(messageFrom(error), 'error'); } finally { actionId = null; confirmAction = null; }
   }
   function move(sourceIndex: number, direction: -1 | 1) {
     const target = sourceIndex + direction; if (target < 0 || target >= sources.length) return;
     const reordered = [...sources]; [reordered[sourceIndex], reordered[target]] = [reordered[target], reordered[sourceIndex]];
-    sources = reordered; persistOrder(); showFeedback('Prioridade do catálogo atualizada.');
+    sources = reordered; persistOrder(); showFeedback(t('settings.folders.priority_updated'));
   }
 </script>
 
 <div class="folder-settings">
   {#if feedback}<Notice tone={feedback.tone}>{feedback.text}</Notice>{/if}
 
-  <SettingGroup title="Adicionar pasta" description={t('settings.folders.description')}>
+  <SettingGroup title={t('settings.folders.add_btn')} description={t('settings.folders.description')}>
     <form class="source-form" onsubmit={addSource}>
       <label for="source-path">{t('settings.folders.path_label')}</label>
       <div class="path-row"><input id="source-path" bind:value={path} placeholder={t('settings.folders.path_placeholder')} autocomplete="off" spellcheck="false" required /><Button type="submit" variant="primary" disabled={submitting || !path.trim()}>{submitting ? t('settings.folders.validating') : t('settings.folders.add_folder')}</Button></div>
@@ -145,11 +145,11 @@
     </form>
   </SettingGroup>
 
-  <SettingGroup title="Downloads" description="O destino de downloads é independente da prioridade usada para navegar no catálogo.">
-    <SettingRow label="Pasta de destino" description="Somente pastas gerenciadas, ativas e disponíveis podem receber downloads.">
+  <SettingGroup title={t('settings.folders.downloads_title')} description={t('settings.folders.downloads_description')}>
+    <SettingRow label={t('settings.folders.download_target')} description={t('settings.folders.download_target_description')}>
       {#snippet control()}
         <select class="destination" value={downloadSettings.target_source_id ?? ''} onchange={(event) => updateDownloadSettings(event.currentTarget.value ? Number(event.currentTarget.value) : null)} disabled={savingDownloadSettings}>
-          <option value="">Nenhuma</option>
+          <option value="">{t('settings.folders.download_target_none')}</option>
           {#each sources.filter((source) => source.mode === 'managed' && source.enabled && (source.available ?? true) && (source.writable ?? true)) as source}<option value={source.id}>{source.path}</option>{/each}
         </select>
       {/snippet}
@@ -161,28 +161,28 @@
     </SettingRow>
   </SettingGroup>
 
-  <SettingGroup title={t('settings.folders.title')} description="A ordem abaixo altera apenas a prioridade de exibição do catálogo.">
+  <SettingGroup title={t('settings.folders.title')} description={t('settings.folders.order_description')}>
     {#snippet actions()}<Button size="sm" onclick={scanAllSources} disabled={scanningAll || !sources.some((source) => source.enabled)}>{scanningAll ? t('settings.folders.scanning') : t('settings.folders.scan_all_btn')}</Button>{/snippet}
     {#if loading && sources.length === 0}<div class="empty">{t('common.loading')}</div>
     {:else if sources.length === 0}<div class="empty">{t('settings.folders.no_folders')}</div>
     {:else}
       <div class="source-table" role="table" aria-label={t('settings.folders.title')}>
-        <div class="source-head" role="row"><span>Pasta</span><span>Modo e acesso</span><span>Última varredura</span><span>Ações</span></div>
+        <div class="source-head" role="row"><span>{t('settings.folders.column_folder')}</span><span>{t('settings.folders.column_mode_access')}</span><span>{t('settings.folders.column_last_scan')}</span><span>{t('settings.folders.column_actions')}</span></div>
         {#each sources as source, index (source.id)}
           {@const sourceAvailable = source.available ?? source.status !== 'error'}
           {@const sourceReadable = source.readable ?? sourceAvailable}
           {@const sourceWritable = source.writable ?? source.mode === 'managed'}
           <div class="source-row" role="row">
-            <div class="source-path"><strong title={source.path}>{source.path}</strong><small>{source.file_count} vídeo(s) · prioridade {index + 1}</small>{#if source.error_message}<small class="error">{source.error_message}</small>{/if}</div>
+            <div class="source-path"><strong title={source.path}>{source.path}</strong><small>{t('settings.folders.video_count_priority', { count: source.file_count, priority: index + 1 })}</small>{#if source.error_message}<small class="error">{source.error_message}</small>{/if}</div>
             <div class="source-state">
-              <span class:managed={source.mode === 'managed'}>{source.mode === 'managed' ? 'Gerenciada' : 'Somente leitura'}</span>
+              <span class:managed={source.mode === 'managed'}>{source.mode === 'managed' ? t('settings.folders.mode_managed') : t('settings.folders.mode_read_only')}</span>
               <small class:error={!sourceAvailable || !sourceReadable}>
-                {#if !sourceAvailable}Indisponível
-                {:else if !sourceReadable}Sem permissão de leitura
-                {:else if source.mode === 'managed' && !sourceWritable}Sem permissão de escrita
-                {:else}{sourceWritable ? 'Leitura e escrita' : 'Somente leitura no disco'}{/if}
+                {#if !sourceAvailable}{t('settings.folders.unavailable')}
+                {:else if !sourceReadable}{t('settings.folders.no_read_permission')}
+                {:else if source.mode === 'managed' && !sourceWritable}{t('settings.folders.no_write_permission')}
+                {:else}{sourceWritable ? t('settings.folders.read_write') : t('settings.folders.disk_read_only')}{/if}
               </small>
-              <small>{source.free_space_bytes == null ? 'Espaço desconhecido' : `${formatBytes(source.free_space_bytes)} livres`}</small>
+              <small>{source.free_space_bytes == null ? t('settings.folders.space_unknown') : t('settings.folders.space_free', { size: formatBytes(source.free_space_bytes) })}</small>
               <small class:error={source.status === 'error'}>{source.enabled ? t(`settings.folders.status_${source.status}`) : t('settings.folders.status_disabled')}</small>
             </div>
             <span class="last-scan">{formatDate(source.last_scanned_at)}</span>
@@ -190,7 +190,7 @@
               <Button size="sm" variant="ghost" onclick={() => move(index, -1)} disabled={index === 0} aria-label={t('settings.folders.move_up_tip')}>↑</Button>
               <Button size="sm" variant="ghost" onclick={() => move(index, 1)} disabled={index === sources.length - 1} aria-label={t('settings.folders.move_down_tip')}>↓</Button>
               <Button size="sm" onclick={() => scanSource(source)} disabled={!source.enabled || actionId === source.id || source.status === 'scanning'}>{t('settings.folders.scan_single_btn')}</Button>
-              <details><summary aria-label="Mais ações">•••</summary><div class="action-menu">
+              <details><summary aria-label={t('settings.folders.more_actions')}>•••</summary><div class="action-menu">
                 <button type="button" onclick={() => toggleSource(source)}>{source.enabled ? t('settings.folders.disable') : t('settings.folders.enable')}</button>
                 <button type="button" onclick={() => source.mode === 'managed' ? setMode(source, 'read_only') : (confirmAction = { kind: 'managed', source })}>{source.mode === 'managed' ? t('settings.folders.set_read_only') : t('settings.folders.set_managed')}</button>
                 <button class="danger" type="button" onclick={() => (confirmAction = { kind: 'remove', source })}>{t('settings.folders.remove')}</button>
@@ -205,8 +205,8 @@
   <FilesystemCenter />
 </div>
 
-<ConfirmDialog open={confirmAction?.kind === 'managed'} title="Permitir alterações nesta pasta?" description={confirmAction ? `${t('settings.folders.managed_confirm')}\n${confirmAction.source.path}` : ''} confirmLabel="Tornar gerenciada" onConfirm={() => confirmAction && setMode(confirmAction.source, 'managed')} onCancel={() => (confirmAction = null)} busy={actionId !== null} />
-<ConfirmDialog open={confirmAction?.kind === 'remove'} title="Remover pasta do catálogo?" description={confirmAction ? `Os arquivos em “${confirmAction.source.path}” permanecerão no disco. Apenas o índice será removido.` : ''} confirmLabel="Remover pasta" dangerous onConfirm={() => confirmAction && removeSource(confirmAction.source)} onCancel={() => (confirmAction = null)} busy={actionId !== null} />
+<ConfirmDialog open={confirmAction?.kind === 'managed'} title={t('settings.folders.managed_dialog_title')} description={confirmAction ? `${t('settings.folders.managed_confirm')}\n${confirmAction.source.path}` : ''} confirmLabel={t('settings.folders.set_managed')} onConfirm={() => confirmAction && setMode(confirmAction.source, 'managed')} onCancel={() => (confirmAction = null)} busy={actionId !== null} />
+<ConfirmDialog open={confirmAction?.kind === 'remove'} title={t('settings.folders.remove_dialog_title')} description={confirmAction ? t('settings.folders.remove_dialog_description', { path: confirmAction.source.path }) : ''} confirmLabel={t('settings.folders.remove_dialog_confirm')} dangerous onConfirm={() => confirmAction && removeSource(confirmAction.source)} onCancel={() => (confirmAction = null)} busy={actionId !== null} />
 
 <style>
   .folder-settings { display: grid; gap: var(--space-6); }

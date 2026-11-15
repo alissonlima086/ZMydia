@@ -33,6 +33,7 @@ test('integracao de Shorts cobre o action bar atual', () => {
 });
 
 test('versao e identidade publicadas sao validas', () => {
-  assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
-  assert.equal(manifest.browser_specific_settings.gecko.id, 'mymedia-downloader@local');
+  assert.equal(manifest.name, 'ZMydia Downloader');
+  assert.equal(manifest.version, '0.1.0');
+  assert.equal(manifest.browser_specific_settings.gecko.id, 'zmydia-downloader@local');
 });

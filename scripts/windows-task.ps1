@@ -4,7 +4,9 @@ param(
     [string]$Action,
 
     [Parameter(Mandatory = $true)]
-    [string]$InstallDirectory
+    [string]$InstallDirectory,
+
+    [string]$ExpectedVersion
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,6 +21,18 @@ if ($Action -eq 'uninstall') {
             Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
         }
+    }
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        $running = Get-CimInstance Win32_Process -Filter "Name = 'zmydia-server.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -eq $executable }
+        if (-not $running) {
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    if ($running) {
+        throw 'ZMydia background service did not stop within 30 seconds'
     }
     exit 0
 }
@@ -72,3 +86,19 @@ Register-ScheduledTask `
     -Description 'Create a daily ZMydia library backup' `
     -Force | Out-Null
 Start-ScheduledTask -TaskName $serviceTaskName
+
+if ($ExpectedVersion) {
+    $deadline = (Get-Date).AddSeconds(45)
+    do {
+        try {
+            $health = Invoke-RestMethod -Uri 'http://127.0.0.1:4173/api/health/ready' -TimeoutSec 2
+            if ($health.status -eq 'ready' -and $health.version -eq $ExpectedVersion) {
+                exit 0
+            }
+        } catch {
+            # The service is expected to be temporarily unavailable while starting.
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    throw "ZMydia $ExpectedVersion did not become ready within 45 seconds"
+}

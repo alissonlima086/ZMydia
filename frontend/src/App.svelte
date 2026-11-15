@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { apiFetch, getCsrfToken } from './lib/api';
+  import { apiFetch, apiJson, getCsrfToken } from './lib/api';
   import { authStore } from './lib/auth.svelte';
   import LoginView from './lib/LoginView.svelte';
   import SetupView from './lib/SetupView.svelte';
@@ -11,6 +11,8 @@
   import VideoModal from './lib/VideoModal.svelte';
   import DownloadsPopover from './lib/DownloadsPopover.svelte';
   import LazyPage from './lib/ui/LazyPage.svelte';
+  import ConfirmDialog from './lib/ui/ConfirmDialog.svelte';
+  import type { UpdateStatus } from './lib/settings/types';
   import { player, type MediaItem } from './lib/player.svelte';
   import { t } from './lib/i18n/i18n.svelte';
   import {
@@ -76,6 +78,45 @@
   let currentPath = $state(window.location.pathname);
   let searchQuery = $state('');
   let homeKey = $state(0);
+  let availableUpdate = $state<UpdateStatus | null>(null);
+  let automaticUpdateCheckStarted = false;
+
+  const AUTO_UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60;
+
+  async function checkUpdatesOnEntry() {
+    if (automaticUpdateCheckStarted) return;
+    automaticUpdateCheckStarted = true;
+    try {
+      let status = await apiJson<UpdateStatus>('/api/updates/status');
+      const now = Math.floor(Date.now() / 1000);
+      const checkIsStale = !status.last_checked_at
+        || now - status.last_checked_at >= AUTO_UPDATE_CHECK_INTERVAL_SECONDS;
+      const canRefresh = !['downloaded', 'applying'].includes(status.phase)
+        && status.installation_method !== 'development';
+      if (checkIsStale && canRefresh) {
+        try {
+          status = await apiJson<UpdateStatus>('/api/updates/check', { method: 'POST' });
+        } catch {
+          // Mantém o último estado conhecido caso a consulta automática falhe.
+        }
+      }
+      const version = status.available_version;
+      const canNotify = version
+        && ['available', 'downloaded'].includes(status.phase)
+        && sessionStorage.getItem(`zmydia:update-notified:${version}`) !== '1';
+      if (canNotify && version) {
+        sessionStorage.setItem(`zmydia:update-notified:${version}`, '1');
+        availableUpdate = status;
+      }
+    } catch {
+      // A verificação automática nunca bloqueia a entrada na aplicação.
+    }
+  }
+
+  function openAvailableUpdate() {
+    availableUpdate = null;
+    selectSettingsTab('dashboard');
+  }
 
   function routeTitle(path: string): string {
     if (path === '/') return t('nav.home');
@@ -245,8 +286,10 @@
       previousAuth = true;
       void musicStore.loadSettings();
       void handleUrlRouting();
+      void checkUpdatesOnEntry();
     } else if (!authStore.authenticated) {
       previousAuth = false;
+      automaticUpdateCheckStarted = false;
     }
   });
 
@@ -411,6 +454,15 @@
     </main>
 
     <VideoModal hidden={currentPath === '/shorts'} />
+    <ConfirmDialog
+      open={availableUpdate !== null}
+      title={t('updates.popup_title')}
+      description={t('updates.popup_description', { version: availableUpdate?.available_version ?? '' })}
+      confirmLabel={t('updates.popup_action')}
+      cancelLabel={t('updates.popup_later')}
+      onConfirm={openAvailableUpdate}
+      onCancel={() => (availableUpdate = null)}
+    />
   </div>
 </div>
 {/if}

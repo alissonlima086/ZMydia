@@ -31,6 +31,21 @@ export type DashboardStats = {
   total_duration_ms: number;
 };
 
+export type UpdateStatus = {
+  phase: 'idle' | 'checking' | 'up_to_date' | 'available' | 'downloading' | 'downloaded' | 'applying' | 'installed' | 'rolled_back' | 'unsupported' | 'error';
+  current_version: string;
+  available_version: string | null;
+  notes_url: string | null;
+  can_self_update: boolean;
+  can_download: boolean;
+  installation_method: 'windows-nsis' | 'linux-user' | 'debian' | 'nix' | 'portable' | 'development';
+  downloaded_bytes: number;
+  total_bytes: number;
+  progress_percent: number;
+  last_checked_at: number | null;
+  error_message: string | null;
+};
+
 export type YoutubeSettings = {
   use_browser_cookies: boolean;
   browser: string;
@@ -83,8 +98,12 @@ export type TokenValidationResult = {
 export type ExtensionInfo = {
   has_signed: boolean;
   has_unsigned: boolean;
-  active_type: 'signed' | 'unsigned' | null;
+  active_type: 'signed' | 'unsigned' | 'chromium' | null;
   download_url: string | null;
+  detected_browser: 'firefox' | 'chromium' | 'unsupported';
+  package_available: boolean;
+  package_type: 'xpi' | 'zip' | null;
+  installation_mode: 'direct' | 'unpacked' | null;
 };
 
 export type ApiTokenItem = {

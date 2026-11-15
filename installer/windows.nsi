@@ -37,6 +37,27 @@ SetCompressor /SOLID lzma
 
 Section "Install"
   SetShellVarContext current
+  StrCpy $1 "0"
+
+  ; An existing scheduled task must release the executable before files are replaced.
+  IfFileExists "$INSTDIR\lib\mymedia\installer\windows-task.ps1" 0 pre_copy
+  nsExec::ExecToLog 'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\lib\mymedia\installer\windows-task.ps1" -Action uninstall -InstallDirectory "$INSTDIR"'
+  Pop $0
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP|MB_OK "The running ZMydia service could not be stopped (exit code $0)." /SD IDOK
+    Abort
+  ${EndIf}
+  RMDir /r "$INSTDIR.previous"
+  ClearErrors
+  Rename "$INSTDIR" "$INSTDIR.previous"
+  IfErrors backup_failed backup_ready
+  backup_failed:
+    MessageBox MB_ICONSTOP|MB_OK "The previous ZMydia installation could not be preserved for rollback." /SD IDOK
+    Abort
+  backup_ready:
+  StrCpy $1 "1"
+
+  pre_copy:
   SetOutPath "$INSTDIR"
   File /r "${PACKAGE_DIR}\*"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
@@ -53,10 +74,18 @@ Section "Install"
   CreateShortcut "$SMPROGRAMS\ZMydia\Open ZMydia.lnk" "$WINDIR\explorer.exe" "http://127.0.0.1:4173"
   CreateShortcut "$SMPROGRAMS\ZMydia\Uninstall ZMydia.lnk" "$INSTDIR\Uninstall.exe"
 
-  nsExec::ExecToLog 'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\lib\mymedia\installer\windows-task.ps1" -Action install -InstallDirectory "$INSTDIR"'
+  nsExec::ExecToLog 'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\lib\mymedia\installer\windows-task.ps1" -Action install -InstallDirectory "$INSTDIR" -ExpectedVersion "${PRODUCT_VERSION}"'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP "ZMydia was installed, but its background service could not be registered (exit code $0)."
+    ${If} $1 == "1"
+      nsExec::ExecToLog 'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\lib\mymedia\installer\windows-task.ps1" -Action uninstall -InstallDirectory "$INSTDIR"'
+      Pop $2
+      RMDir /r "$INSTDIR"
+      Rename "$INSTDIR.previous" "$INSTDIR"
+      nsExec::ExecToLog 'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\lib\mymedia\installer\windows-task.ps1" -Action install -InstallDirectory "$INSTDIR"'
+      Pop $2
+    ${EndIf}
+    MessageBox MB_ICONSTOP|MB_OK "ZMydia was installed, but its background service could not be registered (exit code $0)." /SD IDOK
     Abort
   ${EndIf}
 SectionEnd
@@ -72,4 +101,5 @@ Section "Uninstall"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\ZMydia"
   DeleteRegKey HKCU "Software\ZMydia"
   RMDir /r "$INSTDIR"
+  RMDir /r "$INSTDIR.previous"
 SectionEnd

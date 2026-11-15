@@ -86,6 +86,10 @@ await writeFile(
 );
 
 if (isWindows) {
+  await writeFile(
+    join(packageRoot, 'INSTALLATION.json'),
+    `${JSON.stringify({ schema: 1, method: 'windows-nsis', version }, null, 2)}\n`
+  );
   await mkdir(join(assetRoot, 'installer'), { recursive: true });
   await cp(resolve('scripts/windows-task.ps1'), join(assetRoot, 'installer', 'windows-task.ps1'));
 } else {

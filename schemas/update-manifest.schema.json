@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alissonlima086/ZMydia/schemas/update-manifest.schema.json",
+  "title": "ZMydia signed update manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "channel",
+    "version",
+    "published_at",
+    "min_updater_version",
+    "notes_url",
+    "assets"
+  ],
+  "properties": {
+    "schema": { "const": 1 },
+    "channel": { "const": "stable" },
+    "version": { "$ref": "#/$defs/version" },
+    "published_at": { "type": "string", "format": "date-time" },
+    "min_updater_version": { "$ref": "#/$defs/version" },
+    "notes_url": {
+      "type": "string",
+      "pattern": "^https://github\\.com/alissonlima086/ZMydia/releases/tag/v[0-9]+\\.[0-9]+\\.[0-9]+"
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["windows-x86_64", "linux-x86_64-user", "linux-x86_64-deb"],
+      "properties": {
+        "windows-x86_64": {
+          "allOf": [
+            { "$ref": "#/$defs/asset" },
+            { "properties": { "kind": { "const": "nsis" } } }
+          ]
+        },
+        "linux-x86_64-user": {
+          "allOf": [
+            { "$ref": "#/$defs/asset" },
+            { "properties": { "kind": { "const": "tar" } } }
+          ]
+        },
+        "linux-x86_64-deb": {
+          "allOf": [
+            { "$ref": "#/$defs/asset" },
+            { "properties": { "kind": { "const": "deb" } } }
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "url", "size", "sha256"],
+      "properties": {
+        "kind": { "enum": ["nsis", "tar", "deb"] },
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/alissonlima086/ZMydia/releases/download/v"
+        },
+        "size": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

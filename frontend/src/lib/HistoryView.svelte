@@ -5,7 +5,7 @@
   import PageHeader from './ui/PageHeader.svelte';
   import Button from './ui/Button.svelte';
   import PageState from './ui/PageState.svelte';
-  import { t } from './i18n/i18n.svelte';
+  import { i18n, t } from './i18n/i18n.svelte';
 
   type HistoryItem = MediaItem & {
     watched_at: string;
@@ -29,7 +29,7 @@
     try {
       const res = await apiFetch('/api/history');
       if (!res.ok) {
-        throw new Error(`Falha ao carregar histórico (${res.status})`);
+        throw new Error(t('history.load_failure_status', { status: res.status }));
       }
       historyItems = (await res.json()) as HistoryItem[];
     } catch (err) {
@@ -53,14 +53,11 @@
     } else if (itemDate >= startOfYesterday) {
       return t('history.yesterday');
     } else {
-      const months = [
-        'janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
-        'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'
-      ];
-      if (d.getFullYear() === now.getFullYear()) {
-        return `${d.getDate()} de ${months[d.getMonth()]}`;
-      }
-      return `${d.getDate()} de ${months[d.getMonth()]} de ${d.getFullYear()}`;
+      return new Intl.DateTimeFormat(i18n.currentLocale, {
+        day: 'numeric',
+        month: 'long',
+        year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric'
+      }).format(d);
     }
   }
 
@@ -160,7 +157,7 @@
       {#snippet meta()}
         {#if historyItems.length > 0}
           <span class="history-count-badge">
-            {historyItems.length} {historyItems.length === 1 ? 'vídeo assistido' : 'vídeos assistidos'}
+            {t(historyItems.length === 1 ? 'history.watched_count_one' : 'history.watched_count_many', { count: historyItems.length })}
           </span>
         {/if}
       {/snippet}
@@ -177,19 +174,19 @@
       {#snippet startWatching()}
         <a href="/" class="primary-action">
           <span class="material-symbols-outlined icon-18">home</span>
-          Começar a assistir
+          {t('history.start_watching')}
         </a>
       {/snippet}
       <PageState kind="empty" icon="history" title={t('history.empty_title')} description={t('history.empty_desc')} actions={startWatching} />
     {:else if groupedHistory.length === 0}
       {#snippet clearHistorySearch()}
-        <Button variant="secondary" onclick={() => (searchQuery = '')}>Limpar busca</Button>
+        <Button variant="secondary" onclick={() => (searchQuery = '')}>{t('history.clear_search')}</Button>
       {/snippet}
       <PageState
         kind="empty"
         icon="search_off"
         title={t('common.empty')}
-        description={`Nenhum vídeo no histórico corresponde à busca “${searchQuery}”.`}
+        description={t('history.no_search_results', { query: searchQuery })}
         actions={clearHistorySearch}
       />
     {:else}
@@ -294,7 +291,7 @@
                         <img src={item.channel.avatar_url} alt="" class="history-channel-avatar" />
                       {/if}
                       <span class="history-channel-name">
-                        {item.channel?.name ?? 'Canal desconhecido'}
+                        {item.channel?.name ?? t('stats.unknown_channel')}
                       </span>
                     </div>
 
@@ -365,7 +362,7 @@
 
       <div class="history-side-info">
         <span class="material-symbols-outlined info-icon">info</span>
-        <p>O histórico armazena automaticamente o ponto exato de onde você parou em cada vídeo.</p>
+        <p>{t('history.resume_info')}</p>
       </div>
     </div>
   </aside>

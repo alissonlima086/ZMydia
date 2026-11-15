@@ -114,10 +114,10 @@
       const results = await musicStore.searchMusic(clean);
       candidates = results;
       if (results.length === 0) {
-        candidateError = `Nenhum resultado encontrado no MusicBrainz para "${clean}".`;
+        candidateError = t('music.no_results_query', { query: clean });
       }
     } catch (e: any) {
-      candidateError = e.message || 'Erro ao realizar pesquisa';
+      candidateError = e.message || t('music.search_error');
     } finally {
       isSearchingText = false;
     }
@@ -135,9 +135,9 @@
       });
       currentTrack = saved;
       onTrackUpdated?.(saved);
-      showMessage('success', `Faixa "${saved.track_name}" vinculada com sucesso!`);
+      showMessage('success', t('music.linked_success', { track: saved.track_name }));
     } catch (e: any) {
-      showMessage('error', e.message || 'Erro ao vincular música');
+      showMessage('error', e.message || t('music.link_error'));
     } finally {
       actionLoading = false;
     }
@@ -156,10 +156,10 @@
       if (found) {
         manualCandidate = found;
       } else {
-        idLookupError = 'Nenhuma gravação encontrada com este ID ou link.';
+        idLookupError = t('music.id_not_found');
       }
     } catch (e: any) {
-      idLookupError = e.message || 'Erro ao consultar ID';
+      idLookupError = e.message || t('music.id_error');
     } finally {
       lookingUpId = false;
     }
@@ -184,9 +184,9 @@
       await musicStore.deleteMusic(media.id);
       currentTrack = null;
       onTrackUpdated?.(null);
-      showMessage('success', 'Música desvinculada com sucesso.');
+      showMessage('success', t('music.unlinked_success'));
     } catch (e: any) {
-      showMessage('error', e.message || 'Erro ao desvincular música');
+      showMessage('error', e.message || t('music.unlink_error'));
     } finally {
       actionLoading = false;
     }
@@ -203,9 +203,9 @@
       if (currentTrack) {
         currentTrack.last_scrobbled_at = res.scrobbled_at;
       }
-      showMessage('success', 'Registro (scrobble) enviado para o ListenBrainz com sucesso!');
+      showMessage('success', t('music.scrobble_success'));
     } catch (e: any) {
-      showMessage('error', e.message || 'Falha ao enviar scrobble');
+      showMessage('error', e.message || t('music.scrobble_error'));
     } finally {
       actionLoading = false;
     }
@@ -350,7 +350,7 @@
                 <div class="candidates-list-header">
                   <span class="candidates-heading">{t('music.candidates_title')}</span>
                   <span class="results-badge">
-                    {candidates.length} {candidates.length === 1 ? 'faixa encontrada' : 'faixas encontradas'}
+                    {t(candidates.length === 1 ? 'music.results_count_one' : 'music.results_count_many', { count: candidates.length })}
                   </span>
                 </div>
                 <div class="candidates-list">
@@ -360,7 +360,7 @@
                         <div class="candidate-title-line">
                           <span class="cand-name">{cand.track_name}</span>
                           {#if cand.disambiguation}
-                            <span class="cand-disambiguation-badge" title="Versão ou nota da gravação no MusicBrainz">
+                            <span class="cand-disambiguation-badge" title={t('music.disambiguation_tip')}>
                               {cand.disambiguation}
                             </span>
                           {/if}
@@ -398,10 +398,10 @@
                           {#if isCloseDuration(cand.duration_secs, media.duration_ms)}
                             <span
                               class="cand-match-badge"
-                              title="Duração aproxima-se da duração deste clipe ({formatDuration(Math.round((media.duration_ms || 0) / 1000))})"
+                              title={t('music.duration_match_tip', { duration: formatDuration(Math.round((media.duration_ms || 0) / 1000)) })}
                             >
                               <span class="material-symbols-outlined match-icon">check</span>
-                              compatível com vídeo
+                              {t('music.duration_match')}
                             </span>
                           {/if}
                           {#if cand.recording_mbid}
@@ -466,7 +466,7 @@
                 <input
                   type="text"
                   bind:value={manualIdInput}
-                  placeholder="Ex: e8a93e3d-0453-4b68-8094-0f1118fbca79 ou link do ListenBrainz"
+                  placeholder={t('music.manual_id_placeholder')}
                   class="manual-input"
                   onkeydown={(e) => e.key === 'Enter' && handleLookupId()}
                 />
@@ -499,7 +499,7 @@
                     <div class="candidate-title-line">
                       <span class="preview-title">{manualCandidate.track_name}</span>
                       {#if manualCandidate.disambiguation}
-                        <span class="cand-disambiguation-badge" title="Versão ou nota da gravação no MusicBrainz">
+                        <span class="cand-disambiguation-badge" title={t('music.disambiguation_tip')}>
                           {manualCandidate.disambiguation}
                         </span>
                       {/if}
@@ -536,10 +536,10 @@
                       {#if isCloseDuration(manualCandidate.duration_secs, media.duration_ms)}
                         <span
                           class="cand-match-badge"
-                          title="Duração aproxima-se da duração deste clipe ({formatDuration(Math.round((media.duration_ms || 0) / 1000))})"
+                          title={t('music.duration_match_tip', { duration: formatDuration(Math.round((media.duration_ms || 0) / 1000)) })}
                         >
                           <span class="material-symbols-outlined match-icon">check</span>
-                          compatível com vídeo
+                          {t('music.duration_match')}
                         </span>
                       {/if}
                     </div>

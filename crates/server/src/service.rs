@@ -14,6 +14,8 @@ const BACKUP_TIMER_NAME: &str = "zmydia-backup.timer";
 struct InstallPaths {
     binary: PathBuf,
     app: PathBuf,
+    versions: PathBuf,
+    current: PathBuf,
     data: PathBuf,
     cache: PathBuf,
     config: PathBuf,
@@ -22,9 +24,12 @@ struct InstallPaths {
 
 impl InstallPaths {
     fn from_home(home: &Path) -> Self {
+        let app = home.join(".local/lib/zmydia");
         Self {
             binary: home.join(".local/bin/zmydia-server"),
-            app: home.join(".local/lib/zmydia"),
+            versions: app.join("versions"),
+            current: app.join("current"),
+            app,
             data: home.join(".local/share/zmydia"),
             cache: home.join(".cache/zmydia"),
             config: home.join(".config/zmydia"),
@@ -40,7 +45,10 @@ pub fn handle(arguments: &[String]) -> Result<bool, Box<dyn std::error::Error>> 
     let action = arguments.get(1).map(String::as_str).unwrap_or("status");
     ensure_linux()?;
     match action {
-        "install" => install()?,
+        "install" => install(true)?,
+        "install-update" => install(false)?,
+        "rollback-update" => rollback_last_update()?,
+        "cleanup-updates" => cleanup_versions()?,
         "uninstall" => uninstall()?,
         "status" => forward("systemctl", &["--user", "status", SERVICE_NAME])?,
         "restart" => forward("systemctl", &["--user", "restart", SERVICE_NAME])?,
@@ -81,24 +89,47 @@ fn package_root(executable: &Path) -> Result<PathBuf, Box<dyn std::error::Error>
     Ok(root.to_path_buf())
 }
 
-fn install() -> Result<(), Box<dyn std::error::Error>> {
+fn install(start_service: bool) -> Result<(), Box<dyn std::error::Error>> {
     require_command("systemctl")?;
     let executable = env::current_exe()?;
     let package = package_root(&executable)?;
     let paths = InstallPaths::from_home(&home_dir()?);
+    let version = crate::version::app_version();
+
+    create_directories(&paths)?;
+    let staged_version = paths.versions.join(format!(".{version}.update"));
+    remove_path_if_present(&staged_version)?;
+    copy_file(&executable, &staged_version.join("bin/zmydia-server"), true)?;
+    copy_tree(
+        &package.join("lib/mymedia"),
+        &staged_version.join("lib/mymedia"),
+    )?;
 
     let _ = systemctl(&["stop", SERVICE_NAME]);
-    create_directories(&paths)?;
-    copy_file(&executable, &paths.binary, true)?;
-    copy_tree(&package.join("lib/mymedia"), &paths.app)?;
-    write_units(&paths)?;
-    create_private_env_file(&paths.config.join("zmydia.env"))?;
+    let swap = commit_staged_install(&paths, &staged_version, version)?;
+    let finish = (|| -> Result<(), Box<dyn std::error::Error>> {
+        write_units(&paths)?;
+        create_private_env_file(&paths.config.join("zmydia.env"))?;
+        systemctl_ok(&["daemon-reload"])?;
+        systemctl_ok(&["enable", "--now", BACKUP_TIMER_NAME])?;
+        if start_service {
+            systemctl_ok(&["enable", "--now", SERVICE_NAME])?;
+        } else {
+            systemctl_ok(&["enable", SERVICE_NAME])?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = finish {
+        rollback_install(&paths, &swap)?;
+        let _ = systemctl(&["start", SERVICE_NAME]);
+        return Err(error);
+    }
 
-    systemctl_ok(&["daemon-reload"])?;
-    systemctl_ok(&["enable", "--now", BACKUP_TIMER_NAME])?;
-    systemctl_ok(&["enable", "--now", SERVICE_NAME])?;
-
-    println!("ZMydia is installed and running at http://127.0.0.1:4173");
+    if start_service {
+        println!("ZMydia is installed and running at http://127.0.0.1:4173");
+    } else {
+        println!("ZMydia update is installed and ready to start");
+    }
     println!("Run `zmydia-server service status` to inspect the service.");
     Ok(())
 }
@@ -124,10 +155,49 @@ fn uninstall() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn rollback_last_update() -> Result<(), Box<dyn std::error::Error>> {
+    require_command("systemctl")?;
+    let paths = InstallPaths::from_home(&home_dir()?);
+    let previous_binary = paths.binary.with_extension("previous");
+    let previous_current = paths.app.join("current.previous");
+    if !path_exists(&previous_binary) || !path_exists(&previous_current) {
+        return Err("no previous ZMydia version is available for rollback".into());
+    }
+    let _ = systemctl(&["stop", SERVICE_NAME]);
+    remove_path_if_present(&paths.binary)?;
+    remove_path_if_present(&paths.current)?;
+    fs::rename(previous_binary, &paths.binary)?;
+    fs::rename(previous_current, &paths.current)?;
+    systemctl_ok(&["start", SERVICE_NAME])?;
+    Ok(())
+}
+
+fn cleanup_versions() -> Result<(), Box<dyn std::error::Error>> {
+    let paths = InstallPaths::from_home(&home_dir()?);
+    let mut retained = Vec::new();
+    for link in [&paths.current, &paths.app.join("current.previous")] {
+        if let Ok(target) = fs::read_link(link)
+            && let Some(name) = target.file_name()
+        {
+            retained.push(name.to_os_string());
+        }
+    }
+    if !paths.versions.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&paths.versions)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() && !retained.contains(&entry.file_name()) {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 fn create_directories(paths: &InstallPaths) -> io::Result<()> {
     for path in [
         paths.binary.parent().expect("binary parent"),
-        paths.app.as_path(),
+        paths.versions.as_path(),
         paths.data.as_path(),
         paths.cache.as_path(),
         paths.config.as_path(),
@@ -137,6 +207,127 @@ fn create_directories(paths: &InstallPaths) -> io::Result<()> {
     }
     set_mode(&paths.config, 0o700)?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct InstallSwap {
+    previous_binary: PathBuf,
+    previous_current: PathBuf,
+    replaced_version: PathBuf,
+    installed_version: PathBuf,
+    had_binary: bool,
+    had_current: bool,
+    had_version: bool,
+}
+
+fn commit_staged_install(
+    paths: &InstallPaths,
+    staged_version: &Path,
+    version: &str,
+) -> Result<InstallSwap, Box<dyn std::error::Error>> {
+    if !staged_version.join("bin/zmydia-server").is_file()
+        || !staged_version.join("lib/mymedia/frontend").is_dir()
+    {
+        return Err("staged ZMydia update is incomplete".into());
+    }
+    let previous_binary = paths.binary.with_extension("previous");
+    let previous_current = paths.app.join("current.previous");
+    let installed_version = paths.versions.join(version);
+    let replaced_version = paths.versions.join(format!(".{version}.previous"));
+    let staged_current = paths.app.join("current.update");
+    let staged_binary = paths.binary.with_extension("update");
+    for path in [
+        &previous_binary,
+        &previous_current,
+        &replaced_version,
+        &staged_current,
+        &staged_binary,
+    ] {
+        remove_path_if_present(path)?;
+    }
+    let had_binary = path_exists(&paths.binary);
+    let had_current = path_exists(&paths.current);
+    let had_version = path_exists(&installed_version);
+    if had_version {
+        fs::rename(&installed_version, &replaced_version)?;
+    }
+    fs::rename(staged_version, &installed_version)?;
+    create_symlink(Path::new("versions").join(version), &staged_current)?;
+    create_symlink(
+        Path::new("../lib/zmydia/current/bin/zmydia-server"),
+        &staged_binary,
+    )?;
+
+    let swap = InstallSwap {
+        previous_binary,
+        previous_current,
+        replaced_version,
+        installed_version,
+        had_binary,
+        had_current,
+        had_version,
+    };
+    let activate = (|| -> io::Result<()> {
+        if had_current {
+            fs::rename(&paths.current, &swap.previous_current)?;
+        }
+        fs::rename(&staged_current, &paths.current)?;
+        if had_binary {
+            fs::rename(&paths.binary, &swap.previous_binary)?;
+        }
+        fs::rename(&staged_binary, &paths.binary)?;
+        Ok(())
+    })();
+    if let Err(error) = activate {
+        let _ = rollback_install(paths, &swap);
+        return Err(error.into());
+    }
+    Ok(swap)
+}
+
+fn rollback_install(paths: &InstallPaths, swap: &InstallSwap) -> io::Result<()> {
+    remove_path_if_present(&paths.binary)?;
+    remove_path_if_present(&paths.current)?;
+    if swap.had_binary {
+        fs::rename(&swap.previous_binary, &paths.binary)?;
+    }
+    if swap.had_current {
+        fs::rename(&swap.previous_current, &paths.current)?;
+    }
+    remove_path_if_present(&swap.installed_version)?;
+    if swap.had_version {
+        fs::rename(&swap.replaced_version, &swap.installed_version)?;
+    }
+    Ok(())
+}
+
+fn path_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn remove_path_if_present(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || metadata.is_file() => {
+            fs::remove_file(path)
+        }
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn create_symlink(target: impl AsRef<Path>, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_: impl AsRef<Path>, _: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symbolic links are required for the Linux user installation",
+    ))
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -246,11 +437,11 @@ fn print_help() {
 }
 
 fn service_unit() -> &'static str {
-    "[Unit]\nDescription=ZMydia personal video library\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=%h/.local/bin/zmydia-server serve\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=45\nEnvironment=\"PATH=%h/.local/lib/zmydia/bin:/usr/local/bin:/usr/bin:/bin\"\nEnvironment=\"MYMEDIA_DATA_DIR=%h/.local/share/zmydia\"\nEnvironment=\"MYMEDIA_CACHE_DIR=%h/.cache/zmydia\"\nEnvironment=\"MYMEDIA_FRONTEND_DIR=%h/.local/lib/zmydia/frontend\"\nEnvironment=\"MYMEDIA_EXTENSION_DIR=%h/.local/lib/zmydia/extension\"\nEnvironment=\"MYMEDIA_PORT=4173\"\nEnvironment=\"MYMEDIA_LOG_FORMAT=json\"\nEnvironmentFile=-%h/.config/zmydia/zmydia.env\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=full\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectControlGroups=true\nRestrictRealtime=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryHigh=1500M\nMemoryMax=2500M\nCPUQuota=200%\n\n[Install]\nWantedBy=default.target\n"
+    "[Unit]\nDescription=ZMydia personal video library\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=%h/.local/lib/zmydia/current/bin/zmydia-server serve\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=45\nEnvironment=\"PATH=%h/.local/lib/zmydia/current/lib/mymedia/bin:/usr/local/bin:/usr/bin:/bin\"\nEnvironment=\"MYMEDIA_INSTALLATION_METHOD=linux-user\"\nEnvironment=\"MYMEDIA_DATA_DIR=%h/.local/share/zmydia\"\nEnvironment=\"MYMEDIA_CACHE_DIR=%h/.cache/zmydia\"\nEnvironment=\"MYMEDIA_FRONTEND_DIR=%h/.local/lib/zmydia/current/lib/mymedia/frontend\"\nEnvironment=\"MYMEDIA_EXTENSION_DIR=%h/.local/lib/zmydia/current/lib/mymedia/extension\"\nEnvironment=\"MYMEDIA_PORT=4173\"\nEnvironment=\"MYMEDIA_LOG_FORMAT=json\"\nEnvironmentFile=-%h/.config/zmydia/zmydia.env\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=full\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectControlGroups=true\nRestrictRealtime=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryHigh=1500M\nMemoryMax=2500M\nCPUQuota=200%\n\n[Install]\nWantedBy=default.target\n"
 }
 
 fn backup_service_unit() -> &'static str {
-    "[Unit]\nDescription=Create a ZMydia library backup\nAfter=zmydia.service\n\n[Service]\nType=oneshot\nExecStart=%h/.local/bin/zmydia-server backup\nEnvironment=\"PATH=%h/.local/lib/zmydia/bin:/usr/local/bin:/usr/bin:/bin\"\nEnvironment=\"MYMEDIA_DATA_DIR=%h/.local/share/zmydia\"\nEnvironment=\"MYMEDIA_CACHE_DIR=%h/.cache/zmydia\"\nEnvironment=\"MYMEDIA_FRONTEND_DIR=%h/.local/lib/zmydia/frontend\"\nEnvironment=\"MYMEDIA_EXTENSION_DIR=%h/.local/lib/zmydia/extension\"\nEnvironment=\"MYMEDIA_LOG_FORMAT=json\"\nEnvironmentFile=-%h/.config/zmydia/zmydia.env\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=full\n"
+    "[Unit]\nDescription=Create a ZMydia library backup\nAfter=zmydia.service\n\n[Service]\nType=oneshot\nExecStart=%h/.local/lib/zmydia/current/bin/zmydia-server backup\nEnvironment=\"PATH=%h/.local/lib/zmydia/current/lib/mymedia/bin:/usr/local/bin:/usr/bin:/bin\"\nEnvironment=\"MYMEDIA_INSTALLATION_METHOD=linux-user\"\nEnvironment=\"MYMEDIA_DATA_DIR=%h/.local/share/zmydia\"\nEnvironment=\"MYMEDIA_CACHE_DIR=%h/.cache/zmydia\"\nEnvironment=\"MYMEDIA_FRONTEND_DIR=%h/.local/lib/zmydia/current/lib/mymedia/frontend\"\nEnvironment=\"MYMEDIA_EXTENSION_DIR=%h/.local/lib/zmydia/current/lib/mymedia/extension\"\nEnvironment=\"MYMEDIA_LOG_FORMAT=json\"\nEnvironmentFile=-%h/.config/zmydia/zmydia.env\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=full\n"
 }
 
 fn backup_timer_unit() -> &'static str {
@@ -307,9 +498,54 @@ mod tests {
 
     #[test]
     fn generated_units_use_the_installed_binary_and_assets() {
-        assert!(service_unit().contains("ExecStart=%h/.local/bin/zmydia-server serve"));
-        assert!(service_unit().contains("MYMEDIA_FRONTEND_DIR=%h/.local/lib/zmydia/frontend"));
+        assert!(
+            service_unit()
+                .contains("ExecStart=%h/.local/lib/zmydia/current/bin/zmydia-server serve")
+        );
+        assert!(
+            service_unit()
+                .contains("MYMEDIA_FRONTEND_DIR=%h/.local/lib/zmydia/current/lib/mymedia/frontend")
+        );
+        assert!(service_unit().contains("MYMEDIA_INSTALLATION_METHOD=linux-user"));
         assert!(backup_service_unit().contains("zmydia-server backup"));
         assert!(backup_timer_unit().contains("OnCalendar=daily"));
+    }
+
+    #[test]
+    fn staged_install_can_commit_and_roll_back_atomically() {
+        let root = env::temp_dir().join(format!(
+            "zmydia-service-swap-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let paths = InstallPaths::from_home(&root);
+        fs::create_dir_all(paths.binary.parent().unwrap()).unwrap();
+        fs::create_dir_all(paths.versions.join("0.1.1/bin")).unwrap();
+        fs::create_dir_all(paths.versions.join("0.1.1/lib/mymedia/frontend")).unwrap();
+        fs::write(&paths.binary, "old-binary").unwrap();
+        create_symlink(Path::new("versions/0.1.1"), &paths.current).unwrap();
+        let staged = paths.versions.join(".0.1.2.update");
+        fs::create_dir_all(staged.join("bin")).unwrap();
+        fs::create_dir_all(staged.join("lib/mymedia/frontend")).unwrap();
+        fs::write(staged.join("bin/zmydia-server"), "new-binary").unwrap();
+        fs::write(staged.join("lib/mymedia/frontend/asset"), "new-asset").unwrap();
+
+        let swap = commit_staged_install(&paths, &staged, "0.1.2").unwrap();
+        assert_eq!(
+            fs::read_link(&paths.current).unwrap(),
+            Path::new("versions/0.1.2")
+        );
+        assert_eq!(
+            fs::read_to_string(paths.current.join("lib/mymedia/frontend/asset")).unwrap(),
+            "new-asset"
+        );
+        rollback_install(&paths, &swap).unwrap();
+        assert_eq!(fs::read_to_string(&paths.binary).unwrap(), "old-binary");
+        assert_eq!(
+            fs::read_link(&paths.current).unwrap(),
+            Path::new("versions/0.1.1")
+        );
+        assert!(!paths.versions.join("0.1.2").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

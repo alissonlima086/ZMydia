@@ -1,6 +1,6 @@
 use std::{env, ffi::OsString, net::SocketAddr, path::PathBuf};
 
-use crate::error::AppError;
+use crate::{error::AppError, installation::InstallationInfo};
 
 const DEFAULT_PORT: u16 = 4173;
 
@@ -41,6 +41,7 @@ pub struct Config {
     pub cache_dir: PathBuf,
     pub key_path: PathBuf,
     pub backup_dir: PathBuf,
+    pub installation: InstallationInfo,
     pub security: SecurityConfig,
 }
 
@@ -111,6 +112,7 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("backups"));
         std::fs::create_dir_all(&backup_dir)?;
+        let installation = crate::installation::detect()?;
 
         let mut security = SecurityConfig {
             trust_forwarded_for: env_bool("MYMEDIA_TRUST_FORWARDED_FOR", false),
@@ -132,7 +134,7 @@ impl Config {
                 .unwrap_or_default()
                 .split(',')
                 .map(str::trim)
-                .filter(|value| value.starts_with("moz-extension://") && value.len() <= 128)
+                .filter(|value| is_extension_origin(value))
                 .map(ToOwned::to_owned)
                 .collect(),
         };
@@ -149,9 +151,15 @@ impl Config {
             cache_dir,
             key_path,
             backup_dir,
+            installation,
             security,
         })
     }
+}
+
+pub fn is_extension_origin(value: &str) -> bool {
+    value.len() <= 128
+        && (value.starts_with("moz-extension://") || value.starts_with("chrome-extension://"))
 }
 
 /// Installed packages keep the binary in `bin/` and immutable assets in

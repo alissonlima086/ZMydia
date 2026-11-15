@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { HTMLInputAttributes } from 'svelte/elements';
+  import { t } from '../i18n/i18n.svelte';
 
   let {
     id,
@@ -22,7 +23,7 @@
   <span>{label}</span>
   <span class="password-input">
     <input {id} type={visible ? 'text' : 'password'} bind:value {autocomplete} {minlength} />
-    <button type="button" onclick={() => (visible = !visible)} aria-label={visible ? 'Ocultar senha' : 'Mostrar senha'}>
+    <button type="button" onclick={() => (visible = !visible)} aria-label={visible ? t('common.hide_password') : t('common.show_password')}>
       <span class="material-symbols-outlined" aria-hidden="true">{visible ? 'visibility_off' : 'visibility'}</span>
     </button>
   </span>

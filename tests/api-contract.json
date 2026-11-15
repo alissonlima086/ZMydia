@@ -280,6 +280,18 @@
     "/api/tags": [
       "GET"
     ],
+    "/api/updates/apply": [
+      "POST"
+    ],
+    "/api/updates/check": [
+      "POST"
+    ],
+    "/api/updates/download": [
+      "POST"
+    ],
+    "/api/updates/status": [
+      "GET"
+    ],
     "/api/user/password": [
       "PUT"
     ],

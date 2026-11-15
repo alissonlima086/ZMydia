@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alissonlima086/ZMydia/schemas/installation.schema.json",
+  "title": "ZMydia installation identity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "method", "version"],
+  "properties": {
+    "schema": { "const": 1 },
+    "method": {
+      "enum": [
+        "windows-nsis",
+        "linux-user",
+        "debian",
+        "nix",
+        "portable",
+        "development"
+      ]
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    }
+  }
+}

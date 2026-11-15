@@ -1,12 +1,13 @@
 <script lang="ts">
+  import { t } from '../i18n/i18n.svelte';
   import Button from './Button.svelte';
 
   let {
     open,
     title,
     description,
-    confirmLabel = 'Confirmar',
-    cancelLabel = 'Cancelar',
+    confirmLabel,
+    cancelLabel,
     dangerous = false,
     busy = false,
     onConfirm,
@@ -34,8 +35,10 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if open}
+  {@const resolvedCancelLabel = cancelLabel ?? t('common.cancel')}
+  {@const resolvedConfirmLabel = confirmLabel ?? t('common.confirm')}
   <div class="confirm-dialog__backdrop">
-    <button class="confirm-dialog__dismiss" type="button" aria-label={cancelLabel} onclick={() => !busy && onCancel()}></button>
+    <button class="confirm-dialog__dismiss" type="button" aria-label={resolvedCancelLabel} onclick={() => !busy && onCancel()}></button>
     <div
       class="confirm-dialog"
       role="alertdialog"
@@ -51,9 +54,9 @@
         <p id="confirm-dialog-description">{description}</p>
       </div>
       <div class="confirm-dialog__actions">
-        <Button variant="ghost" disabled={busy} onclick={onCancel}>{cancelLabel}</Button>
+        <Button variant="ghost" disabled={busy} onclick={onCancel}>{resolvedCancelLabel}</Button>
         <Button variant={dangerous ? 'danger' : 'primary'} disabled={busy} onclick={onConfirm}>
-          {busy ? 'Processando…' : confirmLabel}
+          {busy ? t('common.processing') : resolvedConfirmLabel}
         </Button>
       </div>
     </div>

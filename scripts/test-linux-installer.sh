@@ -33,6 +33,11 @@ test -x "$test_dir/home/.local/bin/zmydia"
 test -f "$test_dir/home/.config/systemd/user/zmydia.service"
 test -f "$test_dir/home/.local/share/applications/zmydia.desktop"
 
+# Exercise the versioned replacement path over an already active installation.
+run_installer --update
+test -L "$test_dir/home/.local/lib/zmydia/current"
+test -d "$test_dir/home/.local/lib/zmydia/versions"
+
 run_installer --uninstall
 test ! -e "$test_dir/home/.local/lib/zmydia"
 test -d "$test_dir/home/.local/share/zmydia"

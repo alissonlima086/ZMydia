@@ -210,10 +210,14 @@ pub async fn probe_youtube_video(
         "yt-dlp",
     ));
     cmd.env_remove("LD_LIBRARY_PATH");
-    cmd.arg("--dump-single-json")
+    cmd.arg("--ignore-config")
+        .arg("--dump-single-json")
         .arg("--no-warnings")
         .arg("--no-playlist")
-        .arg("--flat-playlist");
+        .arg("--flat-playlist")
+        .arg("--ignore-no-formats-error")
+        .arg("--format")
+        .arg("all");
 
     if use_cookies && crate::youtube_worker::is_valid_browser(browser) {
         cmd.arg("--cookies-from-browser").arg(browser.trim());
@@ -1084,7 +1088,8 @@ impl DownloadService {
         ));
         cmd.env_remove("LD_LIBRARY_PATH");
         cmd.kill_on_drop(true);
-        cmd.arg("--no-playlist")
+        cmd.arg("--ignore-config")
+            .arg("--no-playlist")
             .arg("-f")
             .arg(format_arg)
             .arg("--remux-video")
