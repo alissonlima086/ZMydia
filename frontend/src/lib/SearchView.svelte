@@ -405,7 +405,7 @@
           {#if loadingMore}
             <span class="spinner-small"></span> {t('common.loading')}
           {:else}
-            Carregar mais resultados
+            {t('search.load_more_results')}
           {/if}
         </button>
       </div>

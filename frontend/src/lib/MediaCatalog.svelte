@@ -670,7 +670,7 @@
           {#if loadingMore}
             <span class="spinner-small"></span> {t('catalog.loading_videos')}
           {:else}
-            Carregar mais vídeos
+            {t('catalog.load_more_videos')}
           {/if}
         </button>
       </div>

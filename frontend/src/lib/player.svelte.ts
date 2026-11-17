@@ -434,26 +434,28 @@ class PlayerStore {
     }
 
     const streamUrl = `/api/media/${media.id}/stream`;
-    this.videoElement.src = streamUrl;
-    this.videoElement.playbackRate = this.playbackRate;
-    this.videoElement.volume = this.volume;
-    this.videoElement.muted = this.isMuted;
+    const video = this.videoElement;
+    video.src = streamUrl;
+    video.playbackRate = this.playbackRate;
+    video.volume = this.volume;
+    video.muted = this.isMuted;
 
-    if (resumeTimeSec > 0) {
-      const applyResume = () => {
-        if (this.videoElement) {
-          this.videoElement.currentTime = resumeTimeSec;
-        }
-      };
-      if (this.videoElement.readyState >= 1) {
-        applyResume();
-      } else {
-        this.videoElement.addEventListener('loadedmetadata', applyResume, { once: true });
-      }
+    // Trocar o `src` nem sempre zera imediatamente o relógio do elemento. Sem
+    // isso, uma mídia sem histórico pode herdar a posição do vídeo anterior.
+    video.currentTime = 0;
+    const applyStartPosition = () => {
+      if (this.videoElement !== video || this.currentMedia?.id !== media.id) return;
+      video.currentTime = resumeTimeSec;
+      this.currentTime = resumeTimeSec;
+    };
+    if (video.readyState >= 1) {
+      applyStartPosition();
+    } else {
+      video.addEventListener('loadedmetadata', applyStartPosition, { once: true });
     }
 
     try {
-      await this.videoElement.play();
+      await video.play();
       this.isPlaying = true;
       this.errorMessage = null;
     } catch (error) {
