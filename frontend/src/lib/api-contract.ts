@@ -38,6 +38,7 @@ export interface ApiRoutes {
   '/api/favorites': { GET: unknown[] };
   '/api/history': { GET: unknown[]; DELETE: void };
   '/api/downloads': { GET: unknown[]; POST: unknown };
+  '/api/download-playlists': { GET: unknown[]; POST: unknown };
 }
 
 export type ApiPath = keyof ApiRoutes;

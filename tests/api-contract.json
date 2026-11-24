@@ -63,6 +63,28 @@
     "/api/diagnostics/capabilities": [
       "GET"
     ],
+    "/api/download-playlists": [
+      "GET",
+      "POST"
+    ],
+    "/api/download-playlists/{id}": [
+      "GET"
+    ],
+    "/api/download-playlists/{id}/cancel": [
+      "POST"
+    ],
+    "/api/download-playlists/{id}/items/selection": [
+      "PUT"
+    ],
+    "/api/download-playlists/{id}/pause": [
+      "POST"
+    ],
+    "/api/download-playlists/{id}/retry-failed": [
+      "POST"
+    ],
+    "/api/download-playlists/{id}/start": [
+      "POST"
+    ],
     "/api/downloads": [
       "GET",
       "POST"

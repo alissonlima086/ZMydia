@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod dashboard;
 pub mod db;
 pub mod dedup;
+pub mod download_playlists;
 pub mod downloader;
 pub mod error;
 pub mod feed;

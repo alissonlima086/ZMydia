@@ -1,4 +1,10 @@
-use std::{collections::HashMap, env, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    env,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use axum::{
     Extension, Json,
@@ -17,6 +23,88 @@ use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
 use crate::{organizer, scanner::ScanQueue, web::AppState, youtube_worker::load_youtube_settings};
+
+static NODE_JS_RUNTIME: OnceLock<Option<String>> = OnceLock::new();
+
+pub(crate) fn configure_ytdlp_js_runtime(command: &mut tokio::process::Command) {
+    let runtime = NODE_JS_RUNTIME.get_or_init(|| {
+        let binary = crate::config::external_command("MYMEDIA_NODE_BIN", "node");
+        let output = std::process::Command::new(&binary)
+            .arg("--version")
+            .env_remove("LD_LIBRARY_PATH")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        let major = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .trim_start_matches('v')
+            .split('.')
+            .next()?
+            .parse::<u32>()
+            .ok()?;
+        if !output.status.success() || major < 22 {
+            return None;
+        }
+        Some(if binary == "node" {
+            "node".to_owned()
+        } else {
+            format!("node:{}", binary.to_string_lossy())
+        })
+    });
+
+    if let Some(runtime) = runtime {
+        // Some distro combinations expose an incompatible Deno/EJS pair. Node 22
+        // is a supported yt-dlp fallback; bundled installations can keep Deno.
+        command
+            .arg("--no-js-runtimes")
+            .arg("--js-runtimes")
+            .arg(runtime);
+    }
+
+    // Temporary upstream workaround for yt-dlp 2026.10.26 with YouTube player
+    // variants that trigger `addOnDisposeCallback` in yt-dlp-ejs 0.8.0.
+    // Remove after the upstream fix is included in the packaged stable yt-dlp.
+    command
+        .arg("--extractor-args")
+        .arg("youtube:player_js_variant=tv");
+}
+
+fn normalize_download_error(raw: &str) -> String {
+    let mut clean = String::with_capacity(raw.len());
+    let mut characters = raw.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' && characters.peek() == Some(&'[') {
+            characters.next();
+            for next in characters.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+        } else if !character.is_control() || matches!(character, '\n' | '\t') {
+            clean.push(character);
+        }
+    }
+
+    let normalized = clean.to_ascii_lowercase();
+    if normalized.contains("addondisposecallback")
+        || normalized.contains("challenge solver failed")
+        || normalized.contains("n challenge solving failed")
+        || (normalized.contains("requested format is not available")
+            && normalized.contains("only images"))
+    {
+        return "O resolvedor JavaScript do YouTube falhou. Reinicie o servidor para aplicar o runtime alternativo e tente novamente.".to_owned();
+    }
+
+    let relevant = clean
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with("ERROR:"))
+        .or_else(|| clean.lines().rev().find(|line| !line.trim().is_empty()))
+        .unwrap_or("O yt-dlp não informou detalhes sobre a falha")
+        .trim();
+    relevant.chars().take(1_000).collect()
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct DownloadSettings {
@@ -210,6 +298,7 @@ pub async fn probe_youtube_video(
         "yt-dlp",
     ));
     cmd.env_remove("LD_LIBRARY_PATH");
+    configure_ytdlp_js_runtime(&mut cmd);
     cmd.arg("--ignore-config")
         .arg("--dump-single-json")
         .arg("--no-warnings")
@@ -384,6 +473,7 @@ struct DownloadTask {
     container: String,
     probe: Option<VideoProbeResponse>,
     target: DownloadTarget,
+    conservative: bool,
     cancel_rx: oneshot::Receiver<CancelReason>,
 }
 
@@ -654,6 +744,29 @@ impl DownloadService {
         quality: Option<String>,
         container: Option<String>,
     ) -> Result<DownloadJob, String> {
+        self.enqueue_with_profile(owner_key, url, quality, container, false)
+            .await
+    }
+
+    pub async fn enqueue_playlist_item(
+        &self,
+        owner_key: &str,
+        url: String,
+        quality: Option<String>,
+        container: Option<String>,
+    ) -> Result<DownloadJob, String> {
+        self.enqueue_with_profile(owner_key, url, quality, container, true)
+            .await
+    }
+
+    async fn enqueue_with_profile(
+        &self,
+        owner_key: &str,
+        url: String,
+        quality: Option<String>,
+        container: Option<String>,
+        conservative: bool,
+    ) -> Result<DownloadJob, String> {
         let clean_url =
             sanitize_youtube_url(&url).ok_or_else(|| "URL inválida do YouTube".to_string())?;
 
@@ -799,6 +912,7 @@ impl DownloadService {
             chosen_container,
             probe,
             target,
+            conservative,
         )
         .await;
 
@@ -845,10 +959,12 @@ impl DownloadService {
                 Option<i64>,
                 i64,
                 String,
+                bool,
             ),
         >(
             "SELECT d.id, d.url, d.quality, d.format_container, d.youtube_id, d.title,
-                    d.channel_name, d.thumbnail_url, d.duration_ms, d.target_source_id, s.path
+                    d.channel_name, d.thumbnail_url, d.duration_ms, d.target_source_id, s.path,
+                    EXISTS(SELECT 1 FROM download_playlist_items dpi WHERE dpi.download_job_id = d.id)
              FROM download_jobs d
              JOIN media_sources s ON s.id = d.target_source_id
              WHERE d.status = 'queued' AND s.enabled = 1 AND s.mode = 'managed'
@@ -890,6 +1006,7 @@ impl DownloadService {
             duration_ms,
             source_id,
             path,
+            conservative,
         ) in jobs
         {
             let probe = youtube_id.map(|youtube_id| VideoProbeResponse {
@@ -912,6 +1029,7 @@ impl DownloadService {
                     source_id,
                     path: PathBuf::from(path),
                 },
+                conservative,
             )
             .await;
         }
@@ -925,6 +1043,7 @@ impl DownloadService {
         container: String,
         probe: Option<VideoProbeResponse>,
         target: DownloadTarget,
+        conservative: bool,
     ) {
         let (cancel_tx, cancel_rx) = oneshot::channel();
         self.cancel_handles
@@ -941,6 +1060,7 @@ impl DownloadService {
                     container,
                     probe,
                     target,
+                    conservative,
                     cancel_rx,
                 })
                 .await;
@@ -1024,6 +1144,7 @@ impl DownloadService {
             container,
             probe,
             target,
+            conservative,
             mut cancel_rx,
         } = task;
         let permit = tokio::select! {
@@ -1087,6 +1208,7 @@ impl DownloadService {
             "yt-dlp",
         ));
         cmd.env_remove("LD_LIBRARY_PATH");
+        configure_ytdlp_js_runtime(&mut cmd);
         cmd.kill_on_drop(true);
         cmd.arg("--ignore-config")
             .arg("--no-playlist")
@@ -1101,6 +1223,19 @@ impl DownloadService {
             .arg(output_template)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+
+        if conservative {
+            cmd.arg("--concurrent-fragments")
+                .arg("1")
+                .arg("--sleep-requests")
+                .arg("2")
+                .arg("--limit-rate")
+                .arg("8M")
+                .arg("--retries")
+                .arg("3")
+                .arg("--fragment-retries")
+                .arg("3");
+        }
 
         if yt_settings.use_browser_cookies
             && crate::youtube_worker::is_valid_browser(&yt_settings.browser)
@@ -1405,7 +1540,7 @@ impl DownloadService {
             Ok(status) => {
                 let mut err_msg = format!("yt-dlp encerrou com código {status}");
                 if !stderr_text.is_empty() {
-                    err_msg = stderr_text;
+                    err_msg = normalize_download_error(&stderr_text);
                 }
                 self.fail_job(&job_id, &err_msg).await;
                 let _ = tokio::fs::remove_dir_all(&temp_dir).await;
@@ -1606,6 +1741,15 @@ pub(crate) async fn update_download_settings_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_javascript_solver_errors_for_the_interface() {
+        let error = normalize_download_error(
+            "\u{1b}[31mERROR:\u{1b}[0m n challenge solving failed: a.addOnDisposeCallback is not a function\nERROR: Requested format is not available. Only images are available",
+        );
+        assert!(error.contains("resolvedor JavaScript"));
+        assert!(!error.contains("addOnDisposeCallback"));
+    }
 
     #[test]
     fn test_sanitize_youtube_url() {

@@ -209,6 +209,7 @@ async fn command_check(
         Duration::from_secs(5),
         Command::new(&binary)
             .arg(version_arg)
+            .env_remove("LD_LIBRARY_PATH")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

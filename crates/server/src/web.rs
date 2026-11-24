@@ -86,6 +86,10 @@ impl AppState {
         let queue = ScanQueue::start(pool.clone(), thumbnails.clone(), youtube.clone());
         let watchers = WatcherService::start(pool.clone(), queue.clone());
         let downloader = DownloadService::start(pool.clone(), PathBuf::from("/tmp"), queue.clone());
+        crate::download_playlists::PlaylistDownloadScheduler::start(
+            pool.clone(),
+            downloader.clone(),
+        );
         let updates = crate::updates::UpdateService::start(&PathBuf::from(format!(
             "/tmp/zmydia-update-test-{}",
             std::process::id()
@@ -182,6 +186,7 @@ pub fn router_with_runtime(
     let queue = ScanQueue::start(pool.clone(), thumbnails.clone(), youtube.clone());
     let watchers = WatcherService::start(pool.clone(), queue.clone());
     let downloader = DownloadService::start(pool.clone(), cache_dir.to_path_buf(), queue.clone());
+    crate::download_playlists::PlaylistDownloadScheduler::start(pool.clone(), downloader.clone());
     let updates = crate::updates::UpdateService::start(cache_dir);
     let authorized_roots = Arc::new(RwLock::new(Vec::new()));
     let rate_limiter = crate::auth::RateLimiter::default();
@@ -294,6 +299,35 @@ pub fn router_with_runtime(
         .route(
             "/api/downloads/{id}/file",
             get(downloader::get_download_file_endpoint),
+        )
+        .route(
+            "/api/download-playlists",
+            get(crate::download_playlists::list_playlists_endpoint)
+                .post(crate::download_playlists::import_playlist_endpoint),
+        )
+        .route(
+            "/api/download-playlists/{id}",
+            get(crate::download_playlists::get_playlist_endpoint),
+        )
+        .route(
+            "/api/download-playlists/{id}/start",
+            post(crate::download_playlists::start_playlist_endpoint),
+        )
+        .route(
+            "/api/download-playlists/{id}/pause",
+            post(crate::download_playlists::pause_playlist_endpoint),
+        )
+        .route(
+            "/api/download-playlists/{id}/cancel",
+            post(crate::download_playlists::cancel_playlist_endpoint),
+        )
+        .route(
+            "/api/download-playlists/{id}/retry-failed",
+            post(crate::download_playlists::retry_failed_playlist_endpoint),
+        )
+        .route(
+            "/api/download-playlists/{id}/items/selection",
+            axum::routing::put(crate::download_playlists::update_selection_endpoint),
         )
         .route(
             "/api/settings/downloads",

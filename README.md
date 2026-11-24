@@ -10,7 +10,7 @@ ZMydia é uma biblioteca pessoal de vídeos, local e privada. Ela organiza víde
 - recomendações locais baseadas nos seus hábitos, com controles de variedade e descoberta;
 - player com progresso, legendas, capítulos, fila e modo Shorts;
 - busca e estatísticas do acervo;
-- downloads do YouTube por meio do ZMydia e da extensão para Firefox;
+- downloads de vídeos do YouTube pela interface e extensão, além de playlists com fila persistente e modo conservador;
 - organização segura de arquivos, detecção de duplicatas, quarentena e restauração;
 - integração opcional com MusicBrainz e ListenBrainz;
 - funcionamento local com banco SQLite e sem depender de uma conta na nuvem.
@@ -56,7 +56,7 @@ ZMydia is a private, local-first personal video library. It organizes videos sto
 - local recommendations based on your viewing habits, with variety and discovery controls;
 - a video player with progress tracking, subtitles, chapters, queues, and a Shorts mode;
 - library-wide search and viewing statistics;
-- YouTube downloads through ZMydia and its Firefox extension;
+- YouTube video downloads through the interface and extension, plus playlists with a persistent queue and conservative mode;
 - safe file organization, duplicate detection, quarantine, and restore tools;
 - optional MusicBrainz and ListenBrainz integration;
 - local operation backed by SQLite, without requiring a cloud account.
