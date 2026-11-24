@@ -477,6 +477,16 @@ struct DownloadTask {
     cancel_rx: oneshot::Receiver<CancelReason>,
 }
 
+struct DownloadSpawnRequest {
+    job_id: String,
+    url: String,
+    quality: String,
+    container: String,
+    probe: Option<VideoProbeResponse>,
+    target: DownloadTarget,
+    conservative: bool,
+}
+
 async fn resolve_download_target(
     pool: &SqlitePool,
     settings: &DownloadSettings,
@@ -905,15 +915,15 @@ impl DownloadService {
         .await
         .map_err(|e| format!("Erro ao buscar job inserido: {e}"))?;
 
-        self.spawn_task(
+        self.spawn_task(DownloadSpawnRequest {
             job_id,
-            clean_url,
-            chosen_quality,
-            chosen_container,
+            url: clean_url,
+            quality: chosen_quality,
+            container: chosen_container,
             probe,
             target,
             conservative,
-        )
+        })
         .await;
 
         Ok(job)
@@ -1019,32 +1029,32 @@ impl DownloadService {
                 available_qualities: Vec::new(),
                 existing_media: None,
             });
-            self.spawn_task(
-                id,
+            self.spawn_task(DownloadSpawnRequest {
+                job_id: id,
                 url,
                 quality,
                 container,
                 probe,
-                DownloadTarget {
+                target: DownloadTarget {
                     source_id,
                     path: PathBuf::from(path),
                 },
                 conservative,
-            )
+            })
             .await;
         }
     }
 
-    async fn spawn_task(
-        &self,
-        job_id: String,
-        url: String,
-        quality: String,
-        container: String,
-        probe: Option<VideoProbeResponse>,
-        target: DownloadTarget,
-        conservative: bool,
-    ) {
+    async fn spawn_task(&self, request: DownloadSpawnRequest) {
+        let DownloadSpawnRequest {
+            job_id,
+            url,
+            quality,
+            container,
+            probe,
+            target,
+            conservative,
+        } = request;
         let (cancel_tx, cancel_rx) = oneshot::channel();
         self.cancel_handles
             .lock()
