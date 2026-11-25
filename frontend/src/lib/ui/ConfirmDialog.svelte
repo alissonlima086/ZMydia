@@ -64,7 +64,8 @@
 {/if}
 
 <style>
-  .confirm-dialog__backdrop { position: fixed; inset: 0; z-index: 1200; display: grid; place-items: center; padding: var(--space-4); background: rgb(0 0 0 / 72%); }
+  /* Must stay above feature modals such as IdentifyMusicModal (z-index: 9999). */
+  .confirm-dialog__backdrop { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; padding: var(--space-4); background: rgb(0 0 0 / 72%); }
   .confirm-dialog__dismiss { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; cursor: default; }
   .confirm-dialog { position: relative; width: min(440px, 100%); display: grid; grid-template-columns: auto 1fr; gap: var(--space-4); padding: var(--space-6); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface-2); box-shadow: var(--shadow-overlay); }
   .confirm-dialog__icon { width: 38px; height: 38px; display: grid; place-items: center; border-radius: var(--radius-full); background: var(--accent-soft); color: var(--accent); }

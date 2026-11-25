@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
 
 use crate::{
-    auth::AuthenticatedUser, downloader::load_download_settings, web::AppState,
+    auth::AuthenticatedUser,
+    downloader::{DOWNLOAD_STALLED_ERROR, LEGACY_DOWNLOAD_STALLED_ERROR, load_download_settings},
+    web::AppState,
     youtube_worker::load_youtube_settings,
 };
 
@@ -44,6 +46,10 @@ pub struct DownloadPlaylistSummary {
     pub completed_count: i64,
     pub failed_count: i64,
     pub unavailable_count: i64,
+    pub pending_count: i64,
+    pub active_count: i64,
+    pub skipped_existing_count: i64,
+    pub cancelled_count: i64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -62,6 +68,9 @@ pub struct DownloadPlaylistItem {
     pub download_job_id: Option<String>,
     pub media_id: Option<i64>,
     pub error_message: Option<String>,
+    pub progress_percent: f64,
+    pub speed_text: Option<String>,
+    pub eta_text: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -329,6 +338,10 @@ const SUMMARY_QUERY: &str =
             COALESCE(SUM(CASE WHEN i.status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
             COALESCE(SUM(CASE WHEN i.status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count,
             COALESCE(SUM(CASE WHEN i.status = 'unavailable' THEN 1 ELSE 0 END), 0) AS unavailable_count,
+            COALESCE(SUM(CASE WHEN i.status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_count,
+            COALESCE(SUM(CASE WHEN i.status IN ('queued', 'downloading', 'processing') THEN 1 ELSE 0 END), 0) AS active_count,
+            COALESCE(SUM(CASE WHEN i.status = 'skipped_existing' THEN 1 ELSE 0 END), 0) AS skipped_existing_count,
+            COALESCE(SUM(CASE WHEN i.status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled_count,
             p.created_at, p.updated_at
      FROM download_playlists p
      LEFT JOIN download_playlist_items i ON i.download_playlist_id = p.id";
@@ -450,11 +463,14 @@ pub(crate) async fn get_playlist_endpoint(
     let limit = query.limit.unwrap_or(100).clamp(1, 250);
     let offset = query.offset.unwrap_or(0).max(0);
     let items = sqlx::query_as::<_, DownloadPlaylistItem>(
-        "SELECT position, youtube_id, title, channel_name, thumbnail_url, duration_ms,
-                availability, selected, status, download_job_id, media_id, error_message
-         FROM download_playlist_items
-         WHERE download_playlist_id = ?
-         ORDER BY position LIMIT ? OFFSET ?",
+        "SELECT i.position, i.youtube_id, i.title, i.channel_name, i.thumbnail_url, i.duration_ms,
+                i.availability, i.selected, i.status, i.download_job_id, i.media_id,
+                i.error_message, COALESCE(j.progress_percent, 0.0) AS progress_percent,
+                j.speed_text, j.eta_text
+         FROM download_playlist_items i
+         LEFT JOIN download_jobs j ON j.id = i.download_job_id
+         WHERE i.download_playlist_id = ?
+         ORDER BY i.position LIMIT ? OFFSET ?",
     )
     .bind(&id)
     .bind(limit)
@@ -511,7 +527,9 @@ impl PlaylistDownloadScheduler {
     }
 
     async fn tick(&self) -> Result<(), sqlx::Error> {
+        self.reclassify_existing_items().await?;
         self.reconcile_jobs().await?;
+        reconcile_existing_playlist_items(&self.pool).await?;
         self.finish_complete_playlists().await?;
 
         let active = sqlx::query_scalar::<_, i64>(
@@ -588,7 +606,7 @@ impl PlaylistDownloadScheduler {
                 .await?;
             }
             Err(message) => {
-                let duplicate = message.contains("já existe na biblioteca");
+                let duplicate = is_existing_item_error(&message);
                 let protected = is_rate_limit_error(&message);
                 sqlx::query(
                     "UPDATE download_playlist_items
@@ -614,6 +632,43 @@ impl PlaylistDownloadScheduler {
                     self.set_cooldown(&playlist_id, 15 * 60).await?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    async fn reclassify_existing_items(&self) -> Result<(), sqlx::Error> {
+        let duplicates = sqlx::query_as::<_, (String, i64)>(
+            "SELECT download_playlist_id, position
+             FROM download_playlist_items
+             WHERE status = 'failed' AND (
+                 error_message = 'already_exists'
+                 OR lower(error_message) LIKE '%destino já existe%'
+                 OR lower(error_message) LIKE '%já existe na biblioteca%'
+             )",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for (playlist_id, position) in duplicates {
+            sqlx::query(
+                "UPDATE download_playlist_items
+                 SET status = 'skipped_existing', error_message = NULL,
+                     updated_at = datetime('now')
+                 WHERE download_playlist_id = ? AND position = ? AND status = 'failed'",
+            )
+            .bind(&playlist_id)
+            .bind(position)
+            .execute(&self.pool)
+            .await?;
+            self.attach_existing_media(&playlist_id, position).await?;
+            sqlx::query(
+                "UPDATE download_playlists
+                 SET cooldown_until = NULL, protection_reason = NULL,
+                     updated_at = datetime('now')
+                 WHERE id = ? AND status = 'running'",
+            )
+            .bind(&playlist_id)
+            .execute(&self.pool)
+            .await?;
         }
         Ok(())
     }
@@ -654,11 +709,13 @@ impl PlaylistDownloadScheduler {
         .await?;
 
         for (playlist_id, position, _job_id, job_status, media_id, error, duration_ms) in jobs {
+            let duplicate = error.as_deref().is_some_and(is_existing_item_error);
             let item_status = match job_status.as_str() {
                 "queued" | "probing" => "queued",
                 "downloading" => "downloading",
                 "organizing" | "awaiting_index" => "processing",
                 "completed" => "completed",
+                "failed" if duplicate => "skipped_existing",
                 "failed" => "failed",
                 "cancelled" => "cancelled",
                 _ => continue,
@@ -684,6 +741,9 @@ impl PlaylistDownloadScheduler {
                 }
                 self.set_cooldown(&playlist_id, conservative_cooldown_seconds(duration_ms))
                     .await?;
+            } else if item_status == "skipped_existing" {
+                self.attach_existing_media(&playlist_id, position).await?;
+                self.set_cooldown(&playlist_id, 0).await?;
             } else if item_status == "failed" {
                 if error.as_deref().is_some_and(is_rate_limit_error) {
                     self.pause_for_protection(
@@ -737,18 +797,7 @@ impl PlaylistDownloadScheduler {
         position: i64,
         media_id: i64,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "INSERT INTO playlist_items (playlist_id, media_id, position)
-             SELECT local_playlist_id, ?, ? FROM download_playlists
-             WHERE id = ? AND local_playlist_id IS NOT NULL
-             ON CONFLICT(playlist_id, media_id) DO UPDATE SET position = excluded.position",
-        )
-        .bind(media_id)
-        .bind(position)
-        .bind(download_playlist_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        link_media_to_local_playlist(&self.pool, download_playlist_id, position, media_id).await
     }
 
     async fn set_cooldown(&self, playlist_id: &str, seconds: i64) -> Result<(), sqlx::Error> {
@@ -793,8 +842,18 @@ impl PlaylistDownloadScheduler {
             "SELECT COUNT(*)
              FROM download_playlist_items i
              JOIN download_jobs j ON j.id = i.download_job_id
-             WHERE j.started_at >= datetime('now', '-24 hours')",
+             WHERE j.started_at >= datetime('now', '-24 hours')
+               AND NOT (
+                   j.status = 'failed'
+                   AND (
+                       j.error_message IN (?, ?, 'already_exists')
+                       OR lower(j.error_message) LIKE '%destino já existe%'
+                       OR lower(j.error_message) LIKE '%já existe na biblioteca%'
+                   )
+               )",
         )
+        .bind(DOWNLOAD_STALLED_ERROR)
+        .bind(LEGACY_DOWNLOAD_STALLED_ERROR)
         .fetch_one(&self.pool)
         .await?;
         let recent_paths = sqlx::query_scalar::<_, String>(
@@ -827,11 +886,21 @@ impl PlaylistDownloadScheduler {
                     FROM download_playlist_items i
                     JOIN download_jobs j ON j.id = i.download_job_id
                     WHERE j.started_at >= datetime('now', '-24 hours')
+                      AND NOT (
+                          j.status = 'failed'
+                          AND (
+                              j.error_message IN (?, ?, 'already_exists')
+                              OR lower(j.error_message) LIKE '%destino já existe%'
+                              OR lower(j.error_message) LIKE '%já existe na biblioteca%'
+                          )
+                      )
                  ),
                  protection_reason = ?,
                  updated_at = datetime('now')
              WHERE id = ?",
         )
+        .bind(DOWNLOAD_STALLED_ERROR)
+        .bind(LEGACY_DOWNLOAD_STALLED_ERROR)
         .bind(reason)
         .bind(playlist_id)
         .execute(&self.pool)
@@ -895,6 +964,13 @@ fn is_rate_limit_error(message: &str) -> bool {
     .any(|pattern| normalized.contains(pattern))
 }
 
+fn is_existing_item_error(message: &str) -> bool {
+    let normalized = message.to_lowercase();
+    normalized == "already_exists"
+        || normalized.contains("destino já existe")
+        || normalized.contains("já existe na biblioteca")
+}
+
 async fn update_playlist_state(
     state: &AppState,
     owner_key: &str,
@@ -903,7 +979,6 @@ async fn update_playlist_state(
 ) -> Result<DownloadPlaylistSummary, StatusCode> {
     let affected = match action {
         "start" => {
-            ensure_local_playlist(state, owner_key, id).await?;
             sqlx::query(
                 "UPDATE download_playlists
                  SET status = 'running', started_at = COALESCE(started_at, datetime('now')),
@@ -967,58 +1042,132 @@ async fn update_playlist_state(
     fetch_summary(state, owner_key, id).await
 }
 
-async fn ensure_local_playlist(
-    state: &AppState,
-    owner_key: &str,
-    id: &str,
-) -> Result<(), StatusCode> {
-    let playlist = sqlx::query_as::<_, (String, bool, Option<String>)>(
-        "SELECT title, create_local_playlist, local_playlist_id
-         FROM download_playlists WHERE id = ? AND owner_key = ?",
-    )
-    .bind(id)
-    .bind(owner_key)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .ok_or(StatusCode::NOT_FOUND)?;
-    if !playlist.1 || playlist.2.is_some() {
-        return Ok(());
+async fn ensure_local_playlist_for_media(
+    pool: &SqlitePool,
+    download_playlist_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let Some((title, youtube_playlist_id, create_local_playlist)) =
+        sqlx::query_as::<_, (String, String, bool)>(
+            "SELECT title, youtube_playlist_id, create_local_playlist
+             FROM download_playlists WHERE id = ?",
+        )
+        .bind(download_playlist_id)
+        .fetch_optional(pool)
+        .await?
+    else {
+        return Ok(None);
+    };
+    if !create_local_playlist {
+        return Ok(None);
     }
 
-    let local_id = format!("pl_youtube_{}", generate_id());
-    let mut transaction = state
-        .pool
-        .begin()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Reuse the local playlist linked by any previous run of the same YouTube
+    // playlist. New imports use a deterministic fallback ID, so repeated runs
+    // cannot create duplicate local playlists.
+    let existing = sqlx::query_scalar::<_, String>(
+        "SELECT dp.local_playlist_id
+         FROM download_playlists dp
+         JOIN playlists p ON p.id = dp.local_playlist_id
+         WHERE dp.youtube_playlist_id = ? AND dp.local_playlist_id IS NOT NULL
+         ORDER BY dp.created_at, dp.id
+         LIMIT 1",
+    )
+    .bind(&youtube_playlist_id)
+    .fetch_optional(pool)
+    .await?;
+    let local_playlist_id = existing.unwrap_or_else(|| format!("pl_youtube_{youtube_playlist_id}"));
+
+    let mut transaction = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO playlists (id, title, description)
-         VALUES (?, ?, 'Playlist criada durante um download do YouTube.')",
+        "INSERT INTO playlists (id, title, description) VALUES (?, ?, NULL)
+         ON CONFLICT(id) DO NOTHING",
     )
-    .bind(&local_id)
-    .bind(&playlist.0)
+    .bind(&local_playlist_id)
+    .bind(&title)
     .execute(&mut *transaction)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let updated = sqlx::query(
-        "UPDATE download_playlists SET local_playlist_id = ?, updated_at = datetime('now')
-         WHERE id = ? AND owner_key = ? AND local_playlist_id IS NULL",
+    .await?;
+    sqlx::query(
+        "UPDATE download_playlists
+         SET local_playlist_id = ?, updated_at = datetime('now')
+         WHERE youtube_playlist_id = ? AND create_local_playlist = 1",
     )
-    .bind(&local_id)
-    .bind(id)
-    .bind(owner_key)
+    .bind(&local_playlist_id)
+    .bind(&youtube_playlist_id)
     .execute(&mut *transaction)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if updated.rows_affected() == 0 {
-        return Err(StatusCode::CONFLICT);
-    }
-    transaction
-        .commit()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .await?;
+    transaction.commit().await?;
+    Ok(Some(local_playlist_id))
+}
+
+async fn link_media_to_local_playlist(
+    pool: &SqlitePool,
+    download_playlist_id: &str,
+    position: i64,
+    media_id: i64,
+) -> Result<(), sqlx::Error> {
+    let Some(local_playlist_id) =
+        ensure_local_playlist_for_media(pool, download_playlist_id).await?
+    else {
+        return Ok(());
+    };
+    sqlx::query(
+        "INSERT INTO playlist_items (playlist_id, media_id, position)
+         VALUES (?, ?, ?)
+         ON CONFLICT(playlist_id, media_id) DO UPDATE SET position = excluded.position",
+    )
+    .bind(&local_playlist_id)
+    .bind(media_id)
+    .bind(position)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE playlists SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?",
+    )
+    .bind(local_playlist_id)
+    .execute(pool)
+    .await?;
     Ok(())
+}
+
+async fn reconcile_existing_playlist_items(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
+    // A filesystem preflight can mark an item as existing before the source
+    // scan has indexed that file. Revisit such items on every scheduler tick,
+    // including after the download playlist itself has already completed.
+    let items = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT i.download_playlist_id, i.position, m.id
+         FROM download_playlist_items i
+         JOIN download_playlists dp ON dp.id = i.download_playlist_id
+         JOIN media m ON m.youtube_id = i.youtube_id AND m.is_available = 1
+         WHERE i.status = 'skipped_existing'
+           AND dp.create_local_playlist = 1
+           AND (
+               i.media_id IS NULL
+               OR dp.local_playlist_id IS NULL
+               OR NOT EXISTS (
+                   SELECT 1 FROM playlist_items pi
+                   WHERE pi.playlist_id = dp.local_playlist_id AND pi.media_id = m.id
+               )
+           )",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut reconciled = 0_u64;
+    for (download_playlist_id, position, media_id) in items {
+        sqlx::query(
+            "UPDATE download_playlist_items SET media_id = ?, updated_at = datetime('now')
+             WHERE download_playlist_id = ? AND position = ?",
+        )
+        .bind(media_id)
+        .bind(&download_playlist_id)
+        .bind(position)
+        .execute(pool)
+        .await?;
+        link_media_to_local_playlist(pool, &download_playlist_id, position, media_id).await?;
+        reconciled += 1;
+    }
+    Ok(reconciled)
 }
 
 pub(crate) async fn update_selection_endpoint(
@@ -1108,12 +1257,71 @@ pub(crate) async fn pause_playlist_endpoint(
         .map(Json)
 }
 
+pub(crate) async fn skip_playlist_cooldown_endpoint(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(id): Path<String>,
+) -> Result<Json<DownloadPlaylistSummary>, StatusCode> {
+    let updated = sqlx::query(
+        "UPDATE download_playlists
+         SET cooldown_until = NULL, updated_at = datetime('now')
+         WHERE id = ? AND owner_key = ? AND status = 'running'
+           AND protection_reason IS NULL
+           AND cooldown_until > datetime('now')
+           AND EXISTS (
+               SELECT 1 FROM download_playlist_items i
+               WHERE i.download_playlist_id = download_playlists.id
+                 AND i.selected = 1 AND i.status = 'pending'
+           )",
+    )
+    .bind(&id)
+    .bind(&user.principal_key)
+    .execute(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if updated.rows_affected() == 0 {
+        return Err(StatusCode::CONFLICT);
+    }
+    fetch_summary(&state, &user.principal_key, &id)
+        .await
+        .map(Json)
+}
+
 pub(crate) async fn cancel_playlist_endpoint(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
 ) -> Result<Json<DownloadPlaylistSummary>, StatusCode> {
-    update_playlist_state(&state, &user.principal_key, &id, "cancel")
+    update_playlist_state(&state, &user.principal_key, &id, "cancel").await?;
+    let active_jobs = sqlx::query_scalar::<_, String>(
+        "SELECT i.download_job_id
+         FROM download_playlist_items i
+         JOIN download_playlists p ON p.id = i.download_playlist_id
+         WHERE i.download_playlist_id = ? AND p.owner_key = ?
+           AND i.status IN ('queued', 'downloading')
+           AND i.download_job_id IS NOT NULL",
+    )
+    .bind(&id)
+    .bind(&user.principal_key)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    sqlx::query(
+        "UPDATE download_playlist_items SET status = 'cancelled', updated_at = datetime('now')
+         WHERE download_playlist_id = ? AND status IN ('queued', 'downloading')",
+    )
+    .bind(&id)
+    .execute(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    for job_id in active_jobs {
+        state
+            .downloader
+            .cancel(&job_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    fetch_summary(&state, &user.principal_key, &id)
         .await
         .map(Json)
 }
@@ -1144,9 +1352,15 @@ pub(crate) async fn retry_failed_playlist_endpoint(
         "UPDATE download_playlist_items
          SET status = 'pending', selected = 1, download_job_id = NULL,
              error_message = NULL, updated_at = datetime('now')
-         WHERE download_playlist_id = ? AND status = 'failed'",
+         WHERE download_playlist_id = ? AND status IN ('failed', 'cancelled')
+           AND EXISTS (
+               SELECT 1 FROM download_playlists p
+               WHERE p.id = download_playlist_items.download_playlist_id
+                 AND p.owner_key = ? AND p.status != 'paused_rate_limit'
+           )",
     )
     .bind(&id)
+    .bind(&user.principal_key)
     .execute(&mut *transaction)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1155,9 +1369,9 @@ pub(crate) async fn retry_failed_playlist_endpoint(
     }
     sqlx::query(
         "UPDATE download_playlists
-         SET status = 'paused', cooldown_until = NULL, protection_reason = NULL,
+         SET status = 'running', cooldown_until = NULL, protection_reason = NULL,
              finished_at = NULL, updated_at = datetime('now')
-         WHERE id = ? AND owner_key = ?",
+         WHERE id = ? AND owner_key = ? AND status != 'paused_rate_limit'",
     )
     .bind(&id)
     .bind(&user.principal_key)
@@ -1169,6 +1383,91 @@ pub(crate) async fn retry_failed_playlist_endpoint(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    fetch_summary(&state, &user.principal_key, &id)
+        .await
+        .map(Json)
+}
+
+pub(crate) async fn retry_playlist_item_endpoint(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((id, position)): Path<(String, i64)>,
+) -> Result<Json<DownloadPlaylistSummary>, StatusCode> {
+    let updated = sqlx::query(
+        "UPDATE download_playlist_items
+         SET status = 'pending', selected = 1, download_job_id = NULL,
+             media_id = NULL, error_message = NULL, updated_at = datetime('now')
+         WHERE download_playlist_id = ? AND position = ?
+           AND status IN ('failed', 'cancelled')
+           AND EXISTS (
+               SELECT 1 FROM download_playlists p
+               WHERE p.id = download_playlist_items.download_playlist_id
+                 AND p.owner_key = ? AND p.status != 'paused_rate_limit'
+           )",
+    )
+    .bind(&id)
+    .bind(position)
+    .bind(&user.principal_key)
+    .execute(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if updated.rows_affected() == 0 {
+        return Err(StatusCode::CONFLICT);
+    }
+    sqlx::query(
+        "UPDATE download_playlists
+         SET status = 'running', cooldown_until = NULL, protection_reason = NULL,
+             finished_at = NULL, updated_at = datetime('now')
+         WHERE id = ? AND owner_key = ?",
+    )
+    .bind(&id)
+    .bind(&user.principal_key)
+    .execute(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    fetch_summary(&state, &user.principal_key, &id)
+        .await
+        .map(Json)
+}
+
+pub(crate) async fn cancel_playlist_item_endpoint(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((id, position)): Path<(String, i64)>,
+) -> Result<Json<DownloadPlaylistSummary>, StatusCode> {
+    let item = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT i.status, i.download_job_id
+         FROM download_playlist_items i
+         JOIN download_playlists p ON p.id = i.download_playlist_id
+         WHERE i.download_playlist_id = ? AND i.position = ? AND p.owner_key = ?",
+    )
+    .bind(&id)
+    .bind(position)
+    .bind(&user.principal_key)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::NOT_FOUND)?;
+    if !matches!(item.0.as_str(), "pending" | "queued" | "downloading") {
+        return Err(StatusCode::CONFLICT);
+    }
+    sqlx::query(
+        "UPDATE download_playlist_items
+         SET status = 'cancelled', error_message = NULL, updated_at = datetime('now')
+         WHERE download_playlist_id = ? AND position = ?",
+    )
+    .bind(&id)
+    .bind(position)
+    .execute(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if let Some(job_id) = item.1 {
+        state
+            .downloader
+            .cancel(&job_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
     fetch_summary(&state, &user.principal_key, &id)
         .await
         .map(Json)
@@ -1231,5 +1530,219 @@ mod tests {
         assert!(is_rate_limit_error("HTTP Error 429: Too Many Requests"));
         assert!(is_rate_limit_error("Sign in to confirm you're not a bot"));
         assert!(!is_rate_limit_error("Video unavailable"));
+    }
+
+    #[test]
+    fn recognizes_existing_files_as_idempotent_playlist_results() {
+        assert!(is_existing_item_error("already_exists"));
+        assert!(is_existing_item_error(
+            "Falha ao mover arquivo: destino já existe; nenhuma cópia foi alterada"
+        ));
+        assert!(is_existing_item_error(
+            "Download bloqueado: este vídeo já existe na biblioteca"
+        ));
+        assert!(!is_existing_item_error("HTTP Error 500"));
+    }
+
+    #[tokio::test]
+    async fn local_playlist_is_reused_by_youtube_playlist_id_without_description() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        for id in ["run-one", "run-two"] {
+            sqlx::query(
+                "INSERT INTO download_playlists
+                 (id, source_url, youtube_playlist_id, title, owner_key)
+                 VALUES (?, 'https://youtube.test/playlist', 'PLstable123456',
+                         'Stable playlist', 'test-owner')",
+            )
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM playlists")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "importing or starting a run must not create an empty local playlist"
+        );
+
+        let first = ensure_local_playlist_for_media(&pool, "run-one")
+            .await
+            .unwrap()
+            .unwrap();
+        let second = ensure_local_playlist_for_media(&pool, "run-two")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, "pl_youtube_PLstable123456");
+        assert_eq!(second, first);
+
+        let local = sqlx::query_as::<_, (i64, Option<String>)>(
+            "SELECT COUNT(*), MAX(description) FROM playlists",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(local, (1, None));
+        let linked = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM download_playlists WHERE local_playlist_id = ?",
+        )
+        .bind(first)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(linked, 2);
+    }
+
+    #[tokio::test]
+    async fn indexed_existing_media_is_later_added_to_the_local_playlist() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "INSERT INTO download_playlists
+             (id, source_url, youtube_playlist_id, title, owner_key, status)
+             VALUES ('existing-run', 'https://youtube.test/playlist', 'PLexisting1234',
+                     'Existing course', 'test-owner', 'completed')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO download_playlist_items
+             (download_playlist_id, position, youtube_id, title, status)
+             VALUES ('existing-run', 3, 'abc123DEF_0', 'Existing lesson', 'skipped_existing')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO media (id, title, youtube_id, is_available)
+             VALUES (902, 'Existing lesson', 'abc123DEF_0', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(reconcile_existing_playlist_items(&pool).await.unwrap(), 1);
+        assert_eq!(reconcile_existing_playlist_items(&pool).await.unwrap(), 0);
+
+        let media_id = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT media_id FROM download_playlist_items
+             WHERE download_playlist_id = 'existing-run' AND position = 3",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(media_id, Some(902));
+        let linked = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM download_playlists dp
+             JOIN playlist_items pi ON pi.playlist_id = dp.local_playlist_id
+             WHERE dp.id = 'existing-run' AND pi.media_id = 902 AND pi.position = 3",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(linked, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_playlist_merge_preserves_items_and_removes_empty_duplicate() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("INSERT INTO media (id, title) VALUES (901, 'Preserved video')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO playlists (id, title, description) VALUES
+             ('pl_youtube_dlp_empty', 'Course', 'Playlist criada durante um download do YouTube.'),
+             ('pl_youtube_dlp_populated', 'Course', 'Playlist criada durante um download do YouTube.'),
+             ('pl_youtube_dlp_only_empty', 'Empty course', 'Playlist criada durante um download do YouTube.')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO playlist_items (playlist_id, media_id, position)
+             VALUES ('pl_youtube_dlp_populated', 901, 4)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (id, local_id) in [
+            ("legacy-run-1", "pl_youtube_dlp_empty"),
+            ("legacy-run-2", "pl_youtube_dlp_populated"),
+        ] {
+            sqlx::query(
+                "INSERT INTO download_playlists
+                 (id, source_url, youtube_playlist_id, title, owner_key, local_playlist_id)
+                 VALUES (?, 'https://youtube.test/playlist', 'PLlegacy123456',
+                         'Course', 'test-owner', ?)",
+            )
+            .bind(id)
+            .bind(local_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO download_playlists
+             (id, source_url, youtube_playlist_id, title, owner_key, local_playlist_id)
+             VALUES ('empty-run', 'https://youtube.test/empty', 'PLempty1234567',
+                     'Empty course', 'test-owner', 'pl_youtube_dlp_only_empty')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/202611250001_merge_youtube_playlists.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let playlists = sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT id, description FROM playlists WHERE title = 'Course'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            playlists,
+            vec![("pl_youtube_dlp_populated".to_owned(), None)]
+        );
+        let linked = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM download_playlists
+             WHERE local_playlist_id = 'pl_youtube_dlp_populated'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(linked, 2);
+        let items = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM playlist_items
+             WHERE playlist_id = 'pl_youtube_dlp_populated' AND media_id = 901",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(items, 1);
+        let empty_local_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT local_playlist_id FROM download_playlists WHERE id = 'empty-run'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(empty_local_id, None);
+        let empty_playlist_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM playlists WHERE id = 'pl_youtube_dlp_only_empty')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!empty_playlist_exists);
     }
 }

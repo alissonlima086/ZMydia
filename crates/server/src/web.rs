@@ -318,6 +318,10 @@ pub fn router_with_runtime(
             post(crate::download_playlists::pause_playlist_endpoint),
         )
         .route(
+            "/api/download-playlists/{id}/skip-cooldown",
+            post(crate::download_playlists::skip_playlist_cooldown_endpoint),
+        )
+        .route(
             "/api/download-playlists/{id}/cancel",
             post(crate::download_playlists::cancel_playlist_endpoint),
         )
@@ -328,6 +332,14 @@ pub fn router_with_runtime(
         .route(
             "/api/download-playlists/{id}/items/selection",
             axum::routing::put(crate::download_playlists::update_selection_endpoint),
+        )
+        .route(
+            "/api/download-playlists/{id}/items/{position}/retry",
+            post(crate::download_playlists::retry_playlist_item_endpoint),
+        )
+        .route(
+            "/api/download-playlists/{id}/items/{position}/cancel",
+            post(crate::download_playlists::cancel_playlist_item_endpoint),
         )
         .route(
             "/api/settings/downloads",

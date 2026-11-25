@@ -73,6 +73,12 @@
     "/api/download-playlists/{id}/cancel": [
       "POST"
     ],
+    "/api/download-playlists/{id}/items/{position}/cancel": [
+      "POST"
+    ],
+    "/api/download-playlists/{id}/items/{position}/retry": [
+      "POST"
+    ],
     "/api/download-playlists/{id}/items/selection": [
       "PUT"
     ],
@@ -80,6 +86,9 @@
       "POST"
     ],
     "/api/download-playlists/{id}/retry-failed": [
+      "POST"
+    ],
+    "/api/download-playlists/{id}/skip-cooldown": [
       "POST"
     ],
     "/api/download-playlists/{id}/start": [

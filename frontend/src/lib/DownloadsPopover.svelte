@@ -67,6 +67,10 @@
     completed_count: number;
     failed_count: number;
     unavailable_count: number;
+    pending_count: number;
+    active_count: number;
+    skipped_existing_count: number;
+    cancelled_count: number;
     created_at: string;
     updated_at: string;
   };
@@ -86,6 +90,9 @@
     download_job_id: string | null;
     media_id: number | null;
     error_message: string | null;
+    progress_percent: number;
+    speed_text: string | null;
+    eta_text: string | null;
   };
 
   type DownloadPlaylistDetail = DownloadPlaylistSummary & {
@@ -115,6 +122,7 @@
   let selectedPlaylistDetail = $state<DownloadPlaylistDetail | null>(null);
   let loadingPlaylistDetail = $state(false);
   let updatingPlaylistSelection = $state(false);
+  let playlistItemActionBusy = $state<string | null>(null);
   let pollInterval: number | null = null;
 
   let activeCount = $derived(
@@ -145,6 +153,7 @@
       if (isOpen || totalActiveCount > 0) {
         void loadJobs();
         void loadPlaylists();
+        if (selectedPlaylistDetail) void refreshSelectedPlaylistDetail();
       }
     }, 1200);
   }
@@ -304,6 +313,25 @@
     return t(`downloads.playlist_status_${status}`);
   }
 
+  function playlistDoneCount(playlist: DownloadPlaylistSummary): number {
+    return playlist.completed_count + playlist.skipped_existing_count;
+  }
+
+  function playlistActivityText(playlist: DownloadPlaylistSummary): string | null {
+    if (playlist.active_count > 0) {
+      return t('downloads.playlist_activity_active', { count: playlist.active_count });
+    }
+    if (playlist.status === 'running' && playlist.cooldown_until) {
+      return t('downloads.playlist_activity_cooldown', {
+        time: parseSqliteUtc(playlist.cooldown_until).toLocaleString()
+      });
+    }
+    if (playlist.status === 'running' && playlist.pending_count > 0) {
+      return t('downloads.playlist_activity_preparing');
+    }
+    return null;
+  }
+
   function parseSqliteUtc(value: string): Date {
     return new Date(`${value.replace(' ', 'T')}Z`);
   }
@@ -312,6 +340,12 @@
     if (!message) return t('downloads.unknown_error');
     const clean = message.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').trim();
     const normalized = clean.toLowerCase();
+    if (
+      normalized === 'download_stalled' ||
+      normalized === 'download encerrado pelo watchdog por falta de progresso'
+    ) {
+      return t('downloads.download_stalled');
+    }
     if (
       normalized.includes('addondisposecallback') ||
       normalized.includes('challenge solver failed') ||
@@ -323,7 +357,17 @@
     return relevant.length > 500 ? `${relevant.slice(0, 497)}…` : relevant;
   }
 
-  async function runPlaylistAction(playlist: DownloadPlaylistSummary, action: 'start' | 'pause' | 'cancel' | 'retry-failed') {
+  function isExistingDownloadResult(message: string | null): boolean {
+    if (!message) return false;
+    const normalized = message.toLowerCase();
+    return (
+      normalized === 'already_exists' ||
+      normalized.includes('destino já existe') ||
+      normalized.includes('já existe na biblioteca')
+    );
+  }
+
+  async function runPlaylistAction(playlist: DownloadPlaylistSummary, action: 'start' | 'pause' | 'cancel' | 'retry-failed' | 'skip-cooldown') {
     playlistActionBusy = playlist.id;
     probeError = null;
     try {
@@ -331,13 +375,46 @@
       if (!response.ok) throw new Error(t('downloads.playlist_action_failed'));
       const updated = (await response.json()) as DownloadPlaylistSummary;
       downloadPlaylists = downloadPlaylists.map((item) => (item.id === updated.id ? updated : item));
-      if (action === 'retry-failed' && selectedPlaylistDetail?.id === updated.id) {
-        await openPlaylistDetail(updated);
-      }
+      if (selectedPlaylistDetail?.id === updated.id) await refreshSelectedPlaylistDetail();
     } catch (error) {
       probeError = error instanceof Error ? error.message : String(error);
     } finally {
       playlistActionBusy = null;
+    }
+  }
+
+  async function refreshSelectedPlaylistDetail() {
+    if (!selectedPlaylistDetail) return;
+    const id = selectedPlaylistDetail.id;
+    const limit = Math.max(100, selectedPlaylistDetail.items.length);
+    try {
+      const response = await apiFetch(`/api/download-playlists/${id}?limit=${limit}&offset=0`);
+      if (response.ok && selectedPlaylistDetail?.id === id) {
+        selectedPlaylistDetail = (await response.json()) as DownloadPlaylistDetail;
+      }
+    } catch {
+      // Polling keeps the last usable state visible.
+    }
+  }
+
+  async function runPlaylistItemAction(item: DownloadPlaylistItem, action: 'retry' | 'cancel') {
+    if (!selectedPlaylistDetail) return;
+    const playlistId = selectedPlaylistDetail.id;
+    playlistItemActionBusy = `${item.position}:${action}`;
+    probeError = null;
+    try {
+      const response = await apiFetch(
+        `/api/download-playlists/${playlistId}/items/${item.position}/${action}`,
+        { method: 'POST' }
+      );
+      if (!response.ok) throw new Error(t('downloads.playlist_item_action_failed'));
+      const summary = (await response.json()) as DownloadPlaylistSummary;
+      downloadPlaylists = downloadPlaylists.map((playlist) => (playlist.id === summary.id ? summary : playlist));
+      await refreshSelectedPlaylistDetail();
+    } catch (error) {
+      probeError = error instanceof Error ? error.message : String(error);
+    } finally {
+      playlistItemActionBusy = null;
     }
   }
 
@@ -721,7 +798,11 @@
         {:else}
           <div class="jobs-list">
             {#each jobs as job (job.id)}
-              <div class="job-card" class:status-completed={job.status === 'completed'} class:status-failed={job.status === 'failed'}>
+              <div
+                class="job-card"
+                class:status-completed={job.status === 'completed' || (job.status === 'failed' && isExistingDownloadResult(job.error_message))}
+                class:status-failed={job.status === 'failed' && !isExistingDownloadResult(job.error_message)}
+              >
                 {#if job.thumbnail_url}
                   <img src={job.thumbnail_url} alt="" class="job-thumb" />
                 {:else}
@@ -746,7 +827,7 @@
                   <div class="job-status-row">
                     {#if job.status === 'downloading'}
                       <div class="job-progress-bar-wrap">
-                        <div class="job-progress-fill" style="width: {job.progress_percent}%"></div>
+                        <div class="job-progress-fill" class:active-progress={job.status === 'downloading'} style="width: {Math.max(job.progress_percent, 2)}%"></div>
                       </div>
                       <div class="job-progress-metrics">
                         <span>{job.progress_percent.toFixed(1)}%</span>
@@ -772,6 +853,11 @@
                       <div class="job-status-badge completed">
                         <span class="material-symbols-outlined icon-14">check_circle</span>
                         <span>{t('downloads.completed')}</span>
+                      </div>
+                    {:else if job.status === 'failed' && isExistingDownloadResult(job.error_message)}
+                      <div class="job-status-badge completed">
+                        <span class="material-symbols-outlined icon-14">library_add_check</span>
+                        <span>{t('downloads.item_status_skipped_existing')}</span>
                       </div>
                     {:else if job.status === 'failed'}
                       <div class="job-status-badge failed" title={job.error_message ?? t('downloads.unknown_error')}>
@@ -850,16 +936,55 @@
               </div>
             </div>
 
-            <div class="playlist-detail-summary">
-              <span>{t('downloads.playlist_selected_count', { selected: selectedPlaylistDetail.selected_count, total: selectedPlaylistDetail.item_count })}</span>
-              <span>{t('downloads.playlist_completed_count', { count: selectedPlaylistDetail.completed_count })}</span>
-              {#if selectedPlaylistDetail.cooldown_until}
-                <span class="cooldown-summary">
-                  <span class="material-symbols-outlined icon-14">schedule</span>
-                  {t('downloads.cooldown_until', { time: parseSqliteUtc(selectedPlaylistDetail.cooldown_until).toLocaleString() })}
-                </span>
-              {/if}
+            <div class="playlist-detail-overview">
+              <div class="playlist-detail-summary">
+                <span>{t('downloads.playlist_selected_count', { selected: selectedPlaylistDetail.selected_count, total: selectedPlaylistDetail.item_count })}</span>
+                <span>{t('downloads.playlist_completed_count', { count: selectedPlaylistDetail.completed_count })}</span>
+                {#if selectedPlaylistDetail.skipped_existing_count > 0}
+                  <span class="existing-summary">{t('downloads.playlist_existing_count', { count: selectedPlaylistDetail.skipped_existing_count })}</span>
+                {/if}
+              </div>
+
+              <div class="playlist-detail-controls">
+                {#if selectedPlaylistDetail.failed_count + selectedPlaylistDetail.cancelled_count > 0}
+                  <button
+                    type="button"
+                    class="primary"
+                    disabled={playlistActionBusy === selectedPlaylistDetail.id || selectedPlaylistDetail.status === 'paused_rate_limit'}
+                    onclick={() => void runPlaylistAction(selectedPlaylistDetail!, 'retry-failed')}
+                  >
+                    <span class="material-symbols-outlined icon-16">refresh</span>
+                    {t('downloads.retry_incomplete_items', { count: selectedPlaylistDetail.failed_count + selectedPlaylistDetail.cancelled_count })}
+                  </button>
+                {/if}
+                {#if selectedPlaylistDetail.status === 'running' && selectedPlaylistDetail.cooldown_until && !selectedPlaylistDetail.protection_reason && parseSqliteUtc(selectedPlaylistDetail.cooldown_until) > new Date()}
+                  <button type="button" class="primary" disabled={playlistActionBusy === selectedPlaylistDetail.id} onclick={() => void runPlaylistAction(selectedPlaylistDetail!, 'skip-cooldown')}>
+                    <span class="material-symbols-outlined icon-16">skip_next</span>{t('downloads.skip_cooldown')}
+                  </button>
+                {/if}
+                {#if ['ready', 'paused'].includes(selectedPlaylistDetail.status)}
+                  <button type="button" class="primary" disabled={playlistActionBusy === selectedPlaylistDetail.id} onclick={() => void runPlaylistAction(selectedPlaylistDetail!, 'start')}>
+                    <span class="material-symbols-outlined icon-16">play_arrow</span>{t('downloads.start_playlist')}
+                  </button>
+                {:else if selectedPlaylistDetail.status === 'running'}
+                  <button type="button" disabled={playlistActionBusy === selectedPlaylistDetail.id} onclick={() => void runPlaylistAction(selectedPlaylistDetail!, 'pause')}>
+                    <span class="material-symbols-outlined icon-16">pause</span>{t('downloads.pause_playlist')}
+                  </button>
+                {/if}
+                {#if ['ready', 'running', 'paused', 'paused_rate_limit'].includes(selectedPlaylistDetail.status)}
+                  <button type="button" class="danger" disabled={playlistActionBusy === selectedPlaylistDetail.id} onclick={() => void runPlaylistAction(selectedPlaylistDetail!, 'cancel')}>
+                    <span class="material-symbols-outlined icon-16">stop_circle</span>{t('downloads.stop_playlist')}
+                  </button>
+                {/if}
+              </div>
             </div>
+
+            {#if playlistActivityText(selectedPlaylistDetail)}
+              <div class="playlist-activity-banner" class:cooldown={selectedPlaylistDetail.active_count === 0 && !!selectedPlaylistDetail.cooldown_until}>
+                <span class="material-symbols-outlined icon-16">{selectedPlaylistDetail.active_count > 0 ? 'downloading' : 'schedule'}</span>
+                <strong>{playlistActivityText(selectedPlaylistDetail)}</strong>
+              </div>
+            {/if}
 
             {#if selectedPlaylistDetail.status === 'ready' || selectedPlaylistDetail.status === 'paused'}
               <div class="playlist-selection-actions">
@@ -870,18 +995,6 @@
                   {t('downloads.select_none')}
                 </button>
               </div>
-            {/if}
-
-            {#if selectedPlaylistDetail.failed_count > 0}
-              <button
-                type="button"
-                class="retry-failed-items"
-                disabled={playlistActionBusy === selectedPlaylistDetail.id}
-                onclick={() => void runPlaylistAction(selectedPlaylistDetail!, 'retry-failed')}
-              >
-                <span class="material-symbols-outlined icon-16">refresh</span>
-                {t('downloads.retry_failed_items', { count: selectedPlaylistDetail.failed_count })}
-              </button>
             {/if}
 
             <div class="playlist-item-list">
@@ -907,8 +1020,25 @@
                     {#if item.status === 'failed'}
                       <span class="playlist-item-error">{displayDownloadError(item.error_message)}</span>
                     {/if}
+                    {#if item.status === 'downloading'}
+                      <div class="playlist-item-progress">
+                        <div class="job-progress-bar-wrap"><div class="job-progress-fill active-progress" style={`width: ${Math.max(item.progress_percent, 2)}%`}></div></div>
+                        <span>{item.progress_percent.toFixed(1)}%{item.speed_text ? ` · ${item.speed_text}` : ''}{item.eta_text ? ` · ETA ${item.eta_text}` : ''}</span>
+                      </div>
+                    {/if}
                   </div>
                   <span class={`playlist-item-status status-${item.status}`}>{t(`downloads.item_status_${item.status}`)}</span>
+                  <div class="playlist-item-actions">
+                    {#if ['failed', 'cancelled'].includes(item.status)}
+                      <button type="button" disabled={playlistItemActionBusy !== null || selectedPlaylistDetail.status === 'paused_rate_limit'} onclick={() => void runPlaylistItemAction(item, 'retry')} title={t('downloads.retry_item')}>
+                        <span class="material-symbols-outlined icon-16">refresh</span>
+                      </button>
+                    {:else if ['pending', 'queued', 'downloading'].includes(item.status)}
+                      <button type="button" class="danger" disabled={playlistItemActionBusy !== null} onclick={() => void runPlaylistItemAction(item, 'cancel')} title={t('downloads.cancel_item')}>
+                        <span class="material-symbols-outlined icon-16">close</span>
+                      </button>
+                    {/if}
+                  </div>
                 </div>
               {/each}
             </div>
@@ -962,11 +1092,18 @@
                       <div class="job-progress-bar-wrap">
                         <div
                           class="job-progress-fill"
-                          style={`width: ${playlist.selected_count > 0 ? (playlist.completed_count / playlist.selected_count) * 100 : 0}%`}
+                          class:active-progress={playlist.status === 'running'}
+                          style={`width: ${playlist.selected_count > 0 ? (playlistDoneCount(playlist) / playlist.selected_count) * 100 : 0}%`}
                         ></div>
                       </div>
-                      <span>{playlist.completed_count}/{playlist.selected_count}</span>
+                      <span>{playlistDoneCount(playlist)}/{playlist.selected_count}</span>
                     </div>
+                    {#if playlistActivityText(playlist)}
+                      <div class="playlist-card-activity">
+                        <span class="spinner-tiny" class:hidden={playlist.active_count === 0}></span>
+                        <span>{playlistActivityText(playlist)}</span>
+                      </div>
+                    {/if}
                     <div class="playlist-card-footer">
                       <span class="format-badge">{playlist.format_container.toUpperCase()}</span>
                       <span>{playlist.quality}</span>
@@ -999,6 +1136,17 @@
                         <span class="material-symbols-outlined icon-18">play_arrow</span>
                       </button>
                     {:else if playlist.status === 'running'}
+                      {#if playlist.cooldown_until && !playlist.protection_reason && parseSqliteUtc(playlist.cooldown_until) > new Date()}
+                        <button
+                          type="button"
+                          class="playlist-action primary"
+                          disabled={playlistActionBusy === playlist.id}
+                          onclick={() => void runPlaylistAction(playlist, 'skip-cooldown')}
+                          title={t('downloads.skip_cooldown')}
+                        >
+                          <span class="material-symbols-outlined icon-18">skip_next</span>
+                        </button>
+                      {/if}
                       <button
                         type="button"
                         class="playlist-action"
@@ -1007,6 +1155,17 @@
                         title={t('downloads.pause_playlist')}
                       >
                         <span class="material-symbols-outlined icon-18">pause</span>
+                      </button>
+                    {/if}
+                    {#if playlist.status === 'cancelled' || playlist.status === 'completed_with_errors'}
+                      <button
+                        type="button"
+                        class="playlist-action primary"
+                        disabled={playlistActionBusy === playlist.id}
+                        onclick={() => void runPlaylistAction(playlist, 'retry-failed')}
+                        title={t('downloads.retry_incomplete_items', { count: playlist.failed_count + playlist.cancelled_count })}
+                      >
+                        <span class="material-symbols-outlined icon-18">refresh</span>
                       </button>
                     {/if}
                     {#if ['ready', 'running', 'paused', 'paused_rate_limit'].includes(playlist.status)}
@@ -1599,22 +1758,105 @@
     font-size: 11px;
   }
 
+  .playlist-detail-overview,
   .playlist-detail-summary,
-  .playlist-selection-actions {
+  .playlist-selection-actions,
+  .playlist-detail-controls {
     display: flex;
     align-items: center;
-    gap: 12px;
+  }
+
+  .playlist-detail-overview {
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    padding: 2px 0;
   }
 
   .playlist-detail-summary {
     flex-wrap: wrap;
-    padding: 4px 0;
+    gap: 0;
   }
 
-  .cooldown-summary {
+  .playlist-detail-summary > span {
     display: inline-flex;
     align-items: center;
+  }
+
+  .playlist-detail-summary > span + span::before {
+    content: '·';
+    margin: 0 7px;
+    color: var(--text-muted);
+  }
+
+  .playlist-detail-summary .existing-summary {
+    color: #86efac;
+  }
+
+  .playlist-detail-controls {
+    gap: 6px;
+    margin-left: auto;
+  }
+
+  .playlist-detail-controls button,
+  .playlist-item-actions button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     gap: 4px;
+    border: 1px solid var(--border-default);
+    border-radius: 6px;
+    background: var(--surface-1);
+    color: var(--text-secondary);
+    padding: 5px 8px;
+    font-size: 10px;
+    cursor: pointer;
+  }
+
+  .playlist-detail-controls button.primary {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface-1));
+    color: var(--accent);
+  }
+
+  .playlist-detail-controls button:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    background: var(--overlay);
+    color: var(--text-primary);
+  }
+
+  .playlist-detail-controls button.primary:hover:not(:disabled) {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, var(--surface-1));
+    color: var(--accent);
+  }
+
+  .playlist-detail-controls button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  .playlist-detail-controls button.danger,
+  .playlist-item-actions button.danger {
+    color: #fca5a5;
+    border-color: rgba(248, 113, 113, 0.35);
+  }
+
+  .playlist-activity-banner {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    color: var(--accent);
+    font-size: 11px;
+  }
+
+  .playlist-activity-banner.cooldown {
+    border-color: rgba(251, 191, 36, 0.3);
+    background: rgba(251, 191, 36, 0.07);
     color: #fbbf24;
   }
 
@@ -1643,7 +1885,7 @@
 
   .playlist-item-row {
     display: grid;
-    grid-template-columns: 20px 30px 56px minmax(0, 1fr) auto;
+    grid-template-columns: 20px 30px 56px minmax(0, 1fr) auto 30px;
     align-items: center;
     gap: 8px;
     min-height: 48px;
@@ -1725,13 +1967,26 @@
     overflow-wrap: anywhere;
   }
 
-  .retry-failed-items {
-    display: inline-flex;
-    align-items: center;
-    align-self: flex-start;
-    gap: 5px;
-    color: #fecaca;
-    border-color: rgba(248, 113, 113, 0.45);
+  .playlist-item-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 2px;
+  }
+
+  .playlist-item-progress > span {
+    color: var(--accent) !important;
+  }
+
+  .playlist-item-actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .playlist-item-actions button {
+    width: 28px;
+    height: 28px;
+    padding: 0;
   }
 
   .load-more-playlist {
@@ -1833,10 +2088,19 @@
   }
 
   .playlist-card-meta,
-  .playlist-card-footer {
+  .playlist-card-footer,
+  .playlist-card-activity {
     gap: 5px;
     color: var(--text-muted);
     font-size: 10px;
+  }
+
+  .playlist-card-activity {
+    color: var(--accent);
+  }
+
+  .playlist-card-activity .hidden {
+    visibility: hidden;
   }
 
   .playlist-progress-row {
@@ -2048,6 +2312,18 @@
     height: 100%;
     background: var(--accent-color, #3ea6ff);
     transition: width 0.2s ease-out;
+  }
+
+  .job-progress-fill.active-progress {
+    min-width: 2%;
+    background: linear-gradient(90deg, var(--accent-color, #3ea6ff), #8fd3ff, var(--accent-color, #3ea6ff));
+    background-size: 200% 100%;
+    animation: downloadProgressPulse 1.4s linear infinite;
+  }
+
+  @keyframes downloadProgressPulse {
+    from { background-position: 100% 0; }
+    to { background-position: -100% 0; }
   }
 
   .job-progress-metrics {

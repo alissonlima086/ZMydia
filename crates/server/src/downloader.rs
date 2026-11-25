@@ -1,9 +1,9 @@
 use std::{
     collections::HashMap,
     env,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use axum::{
@@ -25,6 +25,45 @@ use tower_http::services::ServeFile;
 use crate::{organizer, scanner::ScanQueue, web::AppState, youtube_worker::load_youtube_settings};
 
 static NODE_JS_RUNTIME: OnceLock<Option<String>> = OnceLock::new();
+const YTDLP_PROGRESS_PREFIX: &str = "mymedia-progress:";
+pub(crate) const DOWNLOAD_STALLED_ERROR: &str = "download_stalled";
+pub(crate) const LEGACY_DOWNLOAD_STALLED_ERROR: &str =
+    "Download encerrado pelo watchdog por falta de progresso";
+
+fn parse_ytdlp_progress(line: &str) -> Option<(&str, &str, &str)> {
+    let progress = line.strip_prefix(YTDLP_PROGRESS_PREFIX)?;
+    let mut parts = progress.splitn(3, '|');
+    Some((
+        parts.next()?,
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+    ))
+}
+
+async fn download_activity_signature(path: &std::path::Path) -> (u64, u128, usize) {
+    let Ok(mut entries) = tokio::fs::read_dir(path).await else {
+        return (0, 0, 0);
+    };
+    let mut total_bytes = 0_u64;
+    let mut latest_modified = 0_u128;
+    let mut file_count = 0_usize;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        file_count += 1;
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        if let Ok(modified) = metadata.modified()
+            && let Ok(elapsed) = modified.duration_since(UNIX_EPOCH)
+        {
+            latest_modified = latest_modified.max(elapsed.as_nanos());
+        }
+    }
+    (total_bytes, latest_modified, file_count)
+}
 
 pub(crate) fn configure_ytdlp_js_runtime(command: &mut tokio::process::Command) {
     let runtime = NODE_JS_RUNTIME.get_or_init(|| {
@@ -202,6 +241,10 @@ pub fn parse_quality_height(quality: &str) -> i64 {
             }
         }
     }
+}
+
+fn should_skip_existing(conservative: bool, requested_height: i64, existing_height: i64) -> bool {
+    conservative || requested_height <= existing_height
 }
 
 #[derive(Debug, Deserialize)]
@@ -464,6 +507,50 @@ fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
 struct DownloadTarget {
     source_id: i64,
     path: PathBuf,
+}
+
+fn find_existing_playlist_file(
+    source_root: &Path,
+    probe: &VideoProbeResponse,
+    container: &str,
+) -> Option<PathBuf> {
+    let canonical = organizer::compute_canonical_path(
+        source_root,
+        &probe.channel_name,
+        &probe.title,
+        &probe.youtube_id,
+        probe.is_short,
+        container,
+    );
+    if canonical.is_file() {
+        return Some(canonical);
+    }
+
+    // The title or Shorts classification may have changed since the original
+    // download. The YouTube ID is stable and is part of every canonical name,
+    // so use it as a second, bounded check inside this channel directory.
+    let channel_dir = source_root.join(organizer::sanitize_path_segment(&probe.channel_name));
+    if !channel_dir.is_dir() {
+        return None;
+    }
+    let id_suffix = format!("[{}]", probe.youtube_id);
+    walkdir::WalkDir::new(channel_dir)
+        .max_depth(2)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            if !entry.file_type().is_file() {
+                return None;
+            }
+            let path = entry.path();
+            let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+            if !matches!(extension.as_str(), "mkv" | "mp4") {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?;
+            stem.ends_with(&id_suffix).then(|| path.to_path_buf())
+        })
 }
 
 struct DownloadTask {
@@ -769,6 +856,46 @@ impl DownloadService {
             .await
     }
 
+    async fn request_source_reconciliation(&self, source_id: i64) {
+        let scan_already_active = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM scan_jobs
+                 WHERE source_id = ? AND status IN ('queued', 'running')
+             )",
+        )
+        .bind(source_id)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(1)
+            != 0;
+        if scan_already_active {
+            return;
+        }
+
+        let scan_job_id = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO scan_jobs (source_id, status) VALUES (?, 'queued') RETURNING id",
+        )
+        .bind(source_id)
+        .fetch_one(&self.pool)
+        .await;
+        let Ok(scan_job_id) = scan_job_id else {
+            tracing::warn!(source_id, "could not create library reconciliation scan");
+            return;
+        };
+        if let Err(error) = self.queue.enqueue(scan_job_id, source_id).await {
+            tracing::warn!(%error, source_id, scan_job_id, "could not queue library reconciliation scan");
+            let _ = sqlx::query(
+                "UPDATE scan_jobs
+                 SET status = 'failed', error_message = ?, finished_at = datetime('now')
+                 WHERE id = ?",
+            )
+            .bind("Fila de indexação indisponível")
+            .bind(scan_job_id)
+            .execute(&self.pool)
+            .await;
+        }
+    }
+
     async fn enqueue_with_profile(
         &self,
         owner_key: &str,
@@ -859,12 +986,40 @@ impl DownloadService {
             if let Some((_ex_id, ex_title, _w, h)) = existing {
                 let existing_height = h.unwrap_or(0);
                 let requested_height = parse_quality_height(&chosen_quality);
-                if requested_height > 0 && requested_height <= existing_height {
+                // Playlist runs are resumable/idempotent: an existing item is
+                // always skipped instead of being downloaded again and then
+                // colliding with its canonical path. Manual single-video
+                // downloads may still request an explicit quality upgrade.
+                if should_skip_existing(conservative, requested_height, existing_height) {
                     return Err(format!(
                         "Download bloqueado: este vídeo já existe na biblioteca com qualidade igual ou superior ({}p - \"{}\"). O sistema preserva a melhor cópia para evitar duplicatas.",
                         existing_height, ex_title
                     ));
                 }
+            }
+        }
+
+        // Playlist downloads must be idempotent even when the development DB
+        // has not indexed files already present in the managed source. Check
+        // the physical destination before creating a job or downloading bytes.
+        if conservative && let Some(probe) = probe.as_ref() {
+            let source_root = target.path.clone();
+            let probed_youtube_id = probe.youtube_id.clone();
+            let probe = probe.clone();
+            let container = chosen_container.clone();
+            let existing = tokio::task::spawn_blocking(move || {
+                find_existing_playlist_file(&source_root, &probe, &container)
+            })
+            .await
+            .unwrap_or(None);
+            if let Some(path) = existing {
+                tracing::info!(
+                    youtube_id = %probed_youtube_id,
+                    path = %path.display(),
+                    "playlist item already exists on disk; skipping download"
+                );
+                self.request_source_reconciliation(target.source_id).await;
+                return Err("already_exists".to_owned());
             }
         }
 
@@ -1093,6 +1248,30 @@ impl DownloadService {
         }
     }
 
+    pub async fn cancel(&self, job_id: &str) -> Result<bool, String> {
+        let signalled = self
+            .cancel_handles
+            .lock()
+            .await
+            .remove(job_id)
+            .is_some_and(|sender| sender.send(CancelReason::User).is_ok());
+        if signalled {
+            return Ok(true);
+        }
+
+        let result = sqlx::query(
+            "UPDATE download_jobs
+             SET status = 'cancelled', process_id = NULL, error_message = NULL,
+                 finished_at = datetime('now'), updated_at = datetime('now')
+             WHERE id = ? AND status IN ('queued', 'probing', 'downloading')",
+        )
+        .bind(job_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| format!("Erro ao cancelar job: {error}"))?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn cancel_or_remove(&self, job_id: &str) -> Result<bool, String> {
         // Send cancel if currently running
         {
@@ -1190,6 +1369,38 @@ impl DownloadService {
             }
         }
         let _permit = permit;
+
+        // Re-check at execution time as well. Persisted/recovered jobs can
+        // predate the enqueue preflight, and the library may change while a
+        // job waits for the concurrency permit.
+        if conservative && let Some(probe) = probe.as_ref() {
+            let source_root = target.path.clone();
+            let probe = probe.clone();
+            let container = container.clone();
+            let existing = tokio::task::spawn_blocking(move || {
+                find_existing_playlist_file(&source_root, &probe, &container)
+            })
+            .await
+            .unwrap_or(None);
+            if let Some(path) = existing {
+                tracing::info!(
+                    %job_id,
+                    path = %path.display(),
+                    "recovered playlist job already exists on disk; skipping download"
+                );
+                self.fail_job(&job_id, "already_exists").await;
+                self.request_source_reconciliation(target.source_id).await;
+                let stale_temp_dir = self.cache_dir.join("downloads_temp").join(&job_id);
+                if let Err(error) = tokio::fs::remove_dir_all(stale_temp_dir).await
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!(%error, %job_id, "failed to clean stale duplicate download");
+                }
+                self.cancel_handles.lock().await.remove(&job_id);
+                return;
+            }
+        }
+
         let temp_dir = self.cache_dir.join("downloads_temp").join(&job_id);
         if let Err(error) = tokio::fs::create_dir_all(&temp_dir).await {
             self.fail_job(
@@ -1228,7 +1439,9 @@ impl DownloadService {
             .arg(&container)
             .arg("--newline")
             .arg("--progress-template")
-            .arg("download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s")
+            // The first `download:` is yt-dlp's template type selector and is
+            // consumed by yt-dlp. Keep a separate literal marker in the output.
+            .arg("download:mymedia-progress:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s")
             .arg("-o")
             .arg(output_template)
             .stdout(std::process::Stdio::piped())
@@ -1302,6 +1515,7 @@ impl DownloadService {
 
         let mut last_db_update = tokio::time::Instant::now();
         let mut last_activity = tokio::time::Instant::now();
+        let mut activity_signature = download_activity_signature(&temp_dir).await;
         let mut last_percent = 0.0;
         let mut watchdog = tokio::time::interval(Duration::from_secs(5));
         watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1322,9 +1536,16 @@ impl DownloadService {
                     return;
                 }
                 _ = watchdog.tick() => {
+                    // Progress text covers the network download. File growth also
+                    // covers very large downloads and long remux operations.
+                    let current_signature = download_activity_signature(&temp_dir).await;
+                    if current_signature != activity_signature {
+                        activity_signature = current_signature;
+                        last_activity = tokio::time::Instant::now();
+                    }
                     if last_activity.elapsed() >= self.runtime.idle_timeout {
                         let _ = child.kill().await;
-                        self.fail_job(&job_id, "Download encerrado pelo watchdog por falta de progresso").await;
+                        self.fail_job(&job_id, DOWNLOAD_STALLED_ERROR).await;
                         if let Err(error) = tokio::fs::remove_dir_all(&temp_dir).await {
                             tracing::warn!(%error, %job_id, "failed to clean up expired download");
                         }
@@ -1343,15 +1564,13 @@ impl DownloadService {
                     }
                 } => {
                     if let Ok(Some(line)) = line_res
-                        && let Some(progress) = line.strip_prefix("download:")
+                        && let Some((percent, speed, eta)) = parse_ytdlp_progress(&line)
                     {
                             last_activity = tokio::time::Instant::now();
-                            let parts: Vec<&str> = progress.split('|').collect();
-                            if !parts.is_empty() {
-                                let percent_str = parts[0].trim().trim_end_matches('%');
+                                let percent_str = percent.trim().trim_end_matches('%');
                                 if let Ok(parsed_p) = percent_str.parse::<f64>() {
-                                    let speed_text = parts.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-                                    let eta_text = parts.get(2).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                                    let speed_text = (!speed.trim().is_empty()).then(|| speed.trim().to_owned());
+                                    let eta_text = (!eta.trim().is_empty()).then(|| eta.trim().to_owned());
 
                                     let should_update = last_db_update.elapsed() >= Duration::from_millis(800)
                                         || (parsed_p - last_percent).abs() >= 2.0;
@@ -1374,7 +1593,6 @@ impl DownloadService {
                                             tracing::warn!(%error, %job_id, "failed to persist progress");
                                         }
                                     }
-                                }
                             }
                     }
                 }
@@ -1751,6 +1969,60 @@ pub(crate) async fn update_download_settings_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_the_literal_ytdlp_progress_marker() {
+        assert_eq!(
+            parse_ytdlp_progress("mymedia-progress: 42.5%|3.2MiB/s|00:17"),
+            Some((" 42.5%", "3.2MiB/s", "00:17"))
+        );
+        assert_eq!(
+            parse_ytdlp_progress("42.5%|3.2MiB/s|00:17"),
+            None,
+            "yt-dlp consumes its download: type selector"
+        );
+    }
+
+    #[test]
+    fn playlist_downloads_are_idempotent_even_when_best_exceeds_existing_quality() {
+        assert!(should_skip_existing(true, 1080, 720));
+        assert!(!should_skip_existing(false, 1080, 720));
+        assert!(should_skip_existing(false, 720, 1080));
+    }
+
+    #[test]
+    fn playlist_preflight_finds_unindexed_files_by_youtube_id() {
+        let root = std::env::temp_dir().join(format!(
+            "mymedia-playlist-preflight-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let existing = root
+            .join("Example Channel")
+            .join("Old title [abc123_DEF-].mkv");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        std::fs::write(&existing, b"existing media").unwrap();
+
+        let probe = VideoProbeResponse {
+            youtube_id: "abc123_DEF-".to_owned(),
+            title: "New title".to_owned(),
+            channel_name: "Example Channel".to_owned(),
+            thumbnail_url: None,
+            duration_ms: None,
+            is_short: true,
+            available_qualities: vec![],
+            existing_media: None,
+        };
+
+        assert_eq!(
+            find_existing_playlist_file(&root, &probe, "mp4"),
+            Some(existing)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn normalizes_javascript_solver_errors_for_the_interface() {
