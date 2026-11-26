@@ -4,6 +4,7 @@
   import { player, type MediaItem } from './player.svelte';
   import { t } from './i18n/i18n.svelte';
   import Notice from './ui/Notice.svelte';
+  import ConfirmDialog from './ui/ConfirmDialog.svelte';
 
   type ExistingLibraryMedia = {
     media_id: number;
@@ -59,9 +60,10 @@
     format_container: 'mkv' | 'mp4';
     create_local_playlist: boolean;
     local_playlist_id: string | null;
-    download_profile: 'conservative';
+    download_profile: 'conservative' | 'balanced' | 'fast' | 'custom';
     cooldown_until: string | null;
     protection_reason: string | null;
+    cooldown_reason: string | null;
     item_count: number;
     selected_count: number;
     completed_count: number;
@@ -119,6 +121,7 @@
   let jobs = $state<DownloadJob[]>([]);
   let downloadPlaylists = $state<DownloadPlaylistSummary[]>([]);
   let playlistActionBusy = $state<string | null>(null);
+  let cooldownOverrideTarget = $state<DownloadPlaylistSummary | null>(null);
   let selectedPlaylistDetail = $state<DownloadPlaylistDetail | null>(null);
   let loadingPlaylistDetail = $state(false);
   let updatingPlaylistSelection = $state(false);
@@ -322,6 +325,18 @@
       return t('downloads.playlist_activity_active', { count: playlist.active_count });
     }
     if (playlist.status === 'running' && playlist.cooldown_until) {
+      if (playlist.cooldown_reason?.startsWith('daily_bytes:')) {
+        return t('downloads.playlist_activity_daily_bytes', {
+          limit: playlist.cooldown_reason.split(':')[1],
+          time: parseSqliteUtc(playlist.cooldown_until).toLocaleString()
+        });
+      }
+      if (playlist.cooldown_reason?.startsWith('daily_videos:')) {
+        return t('downloads.playlist_activity_daily_videos', {
+          limit: playlist.cooldown_reason.split(':')[1],
+          time: parseSqliteUtc(playlist.cooldown_until).toLocaleString()
+        });
+      }
       return t('downloads.playlist_activity_cooldown', {
         time: parseSqliteUtc(playlist.cooldown_until).toLocaleString()
       });
@@ -367,11 +382,29 @@
     );
   }
 
-  async function runPlaylistAction(playlist: DownloadPlaylistSummary, action: 'start' | 'pause' | 'cancel' | 'retry-failed' | 'skip-cooldown') {
+  function requestSkipCooldown(playlist: DownloadPlaylistSummary) {
+    if (playlist.cooldown_reason?.startsWith('daily_')) {
+      cooldownOverrideTarget = playlist;
+    } else {
+      void runPlaylistAction(playlist, 'skip-cooldown');
+    }
+  }
+
+  async function confirmSkipCooldown() {
+    if (!cooldownOverrideTarget) return;
+    const target = cooldownOverrideTarget;
+    await runPlaylistAction(target, 'skip-cooldown', true);
+    cooldownOverrideTarget = null;
+  }
+
+  async function runPlaylistAction(playlist: DownloadPlaylistSummary, action: 'start' | 'pause' | 'cancel' | 'retry-failed' | 'skip-cooldown', overrideLimits = false) {
     playlistActionBusy = playlist.id;
     probeError = null;
     try {
-      const response = await apiFetch(`/api/download-playlists/${playlist.id}/${action}`, { method: 'POST' });
+      const response = await apiFetch(`/api/download-playlists/${playlist.id}/${action}`, {
+        method: 'POST',
+        ...(action === 'skip-cooldown' ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ override_limits: overrideLimits }) } : {})
+      });
       if (!response.ok) throw new Error(t('downloads.playlist_action_failed'));
       const updated = (await response.json()) as DownloadPlaylistSummary;
       downloadPlaylists = downloadPlaylists.map((item) => (item.id === updated.id ? updated : item));
@@ -957,8 +990,8 @@
                     {t('downloads.retry_incomplete_items', { count: selectedPlaylistDetail.failed_count + selectedPlaylistDetail.cancelled_count })}
                   </button>
                 {/if}
-                {#if selectedPlaylistDetail.status === 'running' && selectedPlaylistDetail.cooldown_until && !selectedPlaylistDetail.protection_reason && parseSqliteUtc(selectedPlaylistDetail.cooldown_until) > new Date()}
-                  <button type="button" class="primary" disabled={playlistActionBusy === selectedPlaylistDetail.id} onclick={() => void runPlaylistAction(selectedPlaylistDetail!, 'skip-cooldown')}>
+                {#if selectedPlaylistDetail.status === 'running' && selectedPlaylistDetail.cooldown_until && parseSqliteUtc(selectedPlaylistDetail.cooldown_until) > new Date()}
+                  <button type="button" class="primary" disabled={playlistActionBusy === selectedPlaylistDetail.id} onclick={() => requestSkipCooldown(selectedPlaylistDetail!)}>
                     <span class="material-symbols-outlined icon-16">skip_next</span>{t('downloads.skip_cooldown')}
                   </button>
                 {/if}
@@ -1136,12 +1169,12 @@
                         <span class="material-symbols-outlined icon-18">play_arrow</span>
                       </button>
                     {:else if playlist.status === 'running'}
-                      {#if playlist.cooldown_until && !playlist.protection_reason && parseSqliteUtc(playlist.cooldown_until) > new Date()}
+                      {#if playlist.cooldown_until && parseSqliteUtc(playlist.cooldown_until) > new Date()}
                         <button
                           type="button"
                           class="playlist-action primary"
                           disabled={playlistActionBusy === playlist.id}
-                          onclick={() => void runPlaylistAction(playlist, 'skip-cooldown')}
+                          onclick={() => requestSkipCooldown(playlist)}
                           title={t('downloads.skip_cooldown')}
                         >
                           <span class="material-symbols-outlined icon-18">skip_next</span>
@@ -1190,6 +1223,17 @@
     </div>
   {/if}
 </div>
+
+<ConfirmDialog
+  open={cooldownOverrideTarget !== null}
+  title={t('downloads.override_daily_limit_title')}
+  description={t('downloads.override_daily_limit_description')}
+  confirmLabel={t('downloads.override_daily_limit_confirm')}
+  dangerous
+  busy={cooldownOverrideTarget !== null && playlistActionBusy === cooldownOverrideTarget.id}
+  onConfirm={() => void confirmSkipCooldown()}
+  onCancel={() => (cooldownOverrideTarget = null)}
+/>
 
 <style>
   .downloads-popover-anchor {

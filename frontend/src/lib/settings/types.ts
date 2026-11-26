@@ -80,6 +80,16 @@ export type DownloadSettings = {
   preferred_container: string;
 };
 
+export type PlaylistDownloadSettings = {
+  active_profile: 'conservative' | 'balanced' | 'fast' | 'custom';
+  min_cooldown_seconds: number;
+  max_cooldown_seconds: number;
+  dynamic_duration_cooldown: boolean;
+  daily_video_limit: number | null;
+  daily_gb_limit: number | null;
+  daily_limit_action: 'pause_and_notify' | 'ignore';
+};
+
 export type ListenBrainzSettings = {
   enabled: boolean;
   user_token: string;

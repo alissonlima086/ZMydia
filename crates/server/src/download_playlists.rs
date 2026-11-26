@@ -16,8 +16,114 @@ use crate::{
 };
 
 const MAX_PLAYLIST_ITEMS: usize = 10_000;
-const DAILY_PLAYLIST_START_LIMIT: i64 = 6;
-const DAILY_PLAYLIST_BYTES_LIMIT: u64 = 30 * 1024 * 1024 * 1024;
+const PLAYLIST_SETTINGS_KEY: &str = "playlist_download_settings";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlaylistDownloadSettings {
+    pub active_profile: String,
+    pub min_cooldown_seconds: u32,
+    pub max_cooldown_seconds: u32,
+    pub dynamic_duration_cooldown: bool,
+    pub daily_video_limit: Option<u32>,
+    pub daily_gb_limit: Option<u32>,
+    pub daily_limit_action: String,
+}
+
+impl Default for PlaylistDownloadSettings {
+    fn default() -> Self {
+        Self::preset("conservative")
+    }
+}
+
+impl PlaylistDownloadSettings {
+    fn preset(profile: &str) -> Self {
+        match profile {
+            "balanced" => Self {
+                active_profile: profile.into(),
+                min_cooldown_seconds: 45,
+                max_cooldown_seconds: 120,
+                dynamic_duration_cooldown: false,
+                daily_video_limit: None,
+                daily_gb_limit: None,
+                daily_limit_action: "ignore".into(),
+            },
+            "fast" => Self {
+                active_profile: profile.into(),
+                min_cooldown_seconds: 5,
+                max_cooldown_seconds: 15,
+                dynamic_duration_cooldown: false,
+                daily_video_limit: None,
+                daily_gb_limit: None,
+                daily_limit_action: "ignore".into(),
+            },
+            _ => Self {
+                active_profile: "conservative".into(),
+                min_cooldown_seconds: 180,
+                max_cooldown_seconds: 600,
+                dynamic_duration_cooldown: true,
+                daily_video_limit: Some(30),
+                daily_gb_limit: Some(50),
+                daily_limit_action: "pause_and_notify".into(),
+            },
+        }
+    }
+
+    fn normalized(mut self) -> Self {
+        if !matches!(
+            self.active_profile.as_str(),
+            "conservative" | "balanced" | "fast" | "custom"
+        ) {
+            self.active_profile = "conservative".into();
+        }
+        self.min_cooldown_seconds = self.min_cooldown_seconds.min(86_400);
+        self.max_cooldown_seconds = self
+            .max_cooldown_seconds
+            .clamp(self.min_cooldown_seconds, 86_400);
+        self.daily_video_limit = self
+            .daily_video_limit
+            .filter(|value| *value > 0)
+            .map(|value| value.min(10_000));
+        self.daily_gb_limit = self
+            .daily_gb_limit
+            .filter(|value| *value > 0)
+            .map(|value| value.min(100_000));
+        if !matches!(
+            self.daily_limit_action.as_str(),
+            "pause_and_notify" | "ignore"
+        ) {
+            self.daily_limit_action = "pause_and_notify".into();
+        }
+        self
+    }
+}
+
+pub async fn load_playlist_download_settings(pool: &SqlitePool) -> PlaylistDownloadSettings {
+    match sqlx::query_scalar::<_, String>("SELECT value_json FROM settings WHERE key = ?")
+        .bind(PLAYLIST_SETTINGS_KEY)
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(raw)) => serde_json::from_str::<PlaylistDownloadSettings>(&raw)
+            .unwrap_or_default()
+            .normalized(),
+        _ => PlaylistDownloadSettings::default(),
+    }
+}
+
+async fn save_playlist_download_settings(
+    pool: &SqlitePool,
+    settings: PlaylistDownloadSettings,
+) -> Result<PlaylistDownloadSettings, sqlx::Error> {
+    let clean = if settings.active_profile == "custom" {
+        settings.normalized()
+    } else {
+        PlaylistDownloadSettings::preset(&settings.active_profile)
+    };
+    let json = serde_json::to_string(&clean).unwrap_or_else(|_| "{}".into());
+    sqlx::query("INSERT INTO settings (key, value_json, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at")
+        .bind(PLAYLIST_SETTINGS_KEY).bind(json).execute(pool).await?;
+    Ok(clean)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ImportPlaylistRequest {
@@ -41,6 +147,7 @@ pub struct DownloadPlaylistSummary {
     pub download_profile: String,
     pub cooldown_until: Option<String>,
     pub protection_reason: Option<String>,
+    pub cooldown_reason: Option<String>,
     pub item_count: i64,
     pub selected_count: i64,
     pub completed_count: i64,
@@ -332,7 +439,7 @@ async fn insert_items(
 const SUMMARY_QUERY: &str =
     "SELECT p.id, p.title, p.channel_name, p.thumbnail_url, p.status, p.quality,
             p.format_container, p.create_local_playlist, p.local_playlist_id,
-            p.download_profile, p.cooldown_until, p.protection_reason,
+            p.download_profile, p.cooldown_until, p.protection_reason, p.cooldown_reason,
             COUNT(i.position) AS item_count,
             COALESCE(SUM(CASE WHEN i.selected = 1 THEN 1 ELSE 0 END), 0) AS selected_count,
             COALESCE(SUM(CASE WHEN i.status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
@@ -382,6 +489,7 @@ pub(crate) async fn import_playlist_endpoint(
     }
 
     let settings = load_download_settings(&state.pool).await;
+    let playlist_settings = load_playlist_download_settings(&state.pool).await;
     let id = generate_id();
     let quality = payload.quality.unwrap_or_else(|| "best".to_owned());
     let container = match payload.container.as_deref() {
@@ -393,8 +501,9 @@ pub(crate) async fn import_playlist_endpoint(
     sqlx::query(
         "INSERT INTO download_playlists (
             id, source_url, youtube_playlist_id, title, channel_name, thumbnail_url,
-            quality, format_container, target_source_id, owner_key, create_local_playlist
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            quality, format_container, target_source_id, owner_key, create_local_playlist,
+            download_profile
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&source.canonical)
@@ -407,6 +516,7 @@ pub(crate) async fn import_playlist_endpoint(
     .bind(settings.target_source_id)
     .bind(&user.principal_key)
     .bind(create_local_playlist)
+    .bind(&playlist_settings.active_profile)
     .execute(&mut *transaction)
     .await
     .map_err(internal_error)?;
@@ -561,8 +671,18 @@ impl PlaylistDownloadScheduler {
             return Ok(());
         };
 
-        if self.apply_daily_budget_if_needed(&playlist_id).await? {
+        let bypass_budget = sqlx::query_scalar::<_, bool>(
+            "SELECT bypass_budget_once FROM download_playlists WHERE id = ?",
+        )
+        .bind(&playlist_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !bypass_budget && self.apply_daily_budget_if_needed(&playlist_id).await? {
             return Ok(());
+        }
+        if bypass_budget {
+            sqlx::query("UPDATE download_playlists SET bypass_budget_once = 0, cooldown_reason = NULL WHERE id = ?")
+                .bind(&playlist_id).execute(&self.pool).await?;
         }
 
         let item = sqlx::query_as::<_, (i64, String)>(
@@ -739,8 +859,12 @@ impl PlaylistDownloadScheduler {
                     self.add_media_to_local_playlist(&playlist_id, position, media_id)
                         .await?;
                 }
-                self.set_cooldown(&playlist_id, conservative_cooldown_seconds(duration_ms))
-                    .await?;
+                let settings = load_playlist_download_settings(&self.pool).await;
+                self.set_cooldown(
+                    &playlist_id,
+                    configured_cooldown_seconds(&settings, duration_ms),
+                )
+                .await?;
             } else if item_status == "skipped_existing" {
                 self.attach_existing_media(&playlist_id, position).await?;
                 self.set_cooldown(&playlist_id, 0).await?;
@@ -804,9 +928,11 @@ impl PlaylistDownloadScheduler {
         sqlx::query(
             "UPDATE download_playlists
              SET cooldown_until = datetime('now', '+' || ? || ' seconds'),
+                 cooldown_reason = CASE WHEN ? > 0 THEN 'interval' ELSE NULL END,
                  updated_at = datetime('now')
              WHERE id = ? AND status = 'running'",
         )
+        .bind(seconds)
         .bind(seconds)
         .bind(playlist_id)
         .execute(&self.pool)
@@ -838,6 +964,12 @@ impl PlaylistDownloadScheduler {
     }
 
     async fn apply_daily_budget_if_needed(&self, playlist_id: &str) -> Result<bool, sqlx::Error> {
+        let settings = load_playlist_download_settings(&self.pool).await;
+        if settings.daily_limit_action == "ignore"
+            || (settings.daily_video_limit.is_none() && settings.daily_gb_limit.is_none())
+        {
+            return Ok(false);
+        }
         let started = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)
              FROM download_playlist_items i
@@ -871,18 +1003,31 @@ impl PlaylistDownloadScheduler {
                 downloaded_bytes = downloaded_bytes.saturating_add(metadata.len());
             }
         }
-        if started < DAILY_PLAYLIST_START_LIMIT && downloaded_bytes < DAILY_PLAYLIST_BYTES_LIMIT {
+        let video_limit_hit = settings
+            .daily_video_limit
+            .is_some_and(|limit| started >= i64::from(limit));
+        let bytes_limit = settings
+            .daily_gb_limit
+            .map(|limit| u64::from(limit) * 1024 * 1024 * 1024);
+        let bytes_limit_hit = bytes_limit.is_some_and(|limit| downloaded_bytes >= limit);
+        if !video_limit_hit && !bytes_limit_hit {
             return Ok(false);
         }
-        let reason = if downloaded_bytes >= DAILY_PLAYLIST_BYTES_LIMIT {
-            "Limite conservador de 30 GiB em 24 horas atingido"
+        let reason = if bytes_limit_hit {
+            format!(
+                "daily_bytes:{}",
+                settings.daily_gb_limit.unwrap_or_default()
+            )
         } else {
-            "Limite conservador de 6 vídeos em 24 horas atingido"
+            format!(
+                "daily_videos:{}",
+                settings.daily_video_limit.unwrap_or_default()
+            )
         };
         sqlx::query(
             "UPDATE download_playlists
              SET cooldown_until = (
-                    SELECT datetime(MIN(j.started_at), '+24 hours')
+                    SELECT COALESCE(datetime(MAX(j.started_at), '+24 hours'), datetime('now', '+24 hours'))
                     FROM download_playlist_items i
                     JOIN download_jobs j ON j.id = i.download_job_id
                     WHERE j.started_at >= datetime('now', '-24 hours')
@@ -895,7 +1040,7 @@ impl PlaylistDownloadScheduler {
                           )
                       )
                  ),
-                 protection_reason = ?,
+                 cooldown_reason = ?,
                  updated_at = datetime('now')
              WHERE id = ?",
         )
@@ -934,14 +1079,22 @@ impl PlaylistDownloadScheduler {
     }
 }
 
-fn conservative_cooldown_seconds(duration_ms: Option<i64>) -> i64 {
-    let minutes = duration_ms.unwrap_or_default() / 60_000;
-    let (minimum, maximum) = match minutes {
-        ..=30 => (3 * 60, 7 * 60),
-        31..=120 => (8 * 60, 15 * 60),
-        121..=240 => (15 * 60, 30 * 60),
-        _ => (30 * 60, 60 * 60),
-    };
+fn configured_cooldown_seconds(
+    settings: &PlaylistDownloadSettings,
+    duration_ms: Option<i64>,
+) -> i64 {
+    let mut minimum = i64::from(settings.min_cooldown_seconds);
+    let mut maximum = i64::from(settings.max_cooldown_seconds);
+    if settings.dynamic_duration_cooldown {
+        let multiplier = match duration_ms.unwrap_or_default() / 60_000 {
+            ..=30 => 1,
+            31..=120 => 2,
+            121..=240 => 3,
+            _ => 6,
+        };
+        minimum = (minimum * multiplier).min(86_400);
+        maximum = (maximum * multiplier).min(86_400).max(minimum);
+    }
     let spread = maximum - minimum + 1;
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1261,21 +1414,31 @@ pub(crate) async fn skip_playlist_cooldown_endpoint(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
+    payload: Option<Json<SkipCooldownRequest>>,
 ) -> Result<Json<DownloadPlaylistSummary>, StatusCode> {
+    let override_limits = payload
+        .map(|Json(value)| value.override_limits)
+        .unwrap_or(false);
     let updated = sqlx::query(
         "UPDATE download_playlists
-         SET cooldown_until = NULL, updated_at = datetime('now')
+         SET cooldown_until = NULL,
+             bypass_budget_once = CASE WHEN cooldown_reason LIKE 'daily_%' AND ? THEN 1 ELSE bypass_budget_once END,
+             cooldown_reason = CASE WHEN cooldown_reason LIKE 'daily_%' AND NOT ? THEN cooldown_reason ELSE NULL END,
+             updated_at = datetime('now')
          WHERE id = ? AND owner_key = ? AND status = 'running'
-           AND protection_reason IS NULL
            AND cooldown_until > datetime('now')
+           AND (? OR cooldown_reason IS NULL OR cooldown_reason NOT LIKE 'daily_%')
            AND EXISTS (
                SELECT 1 FROM download_playlist_items i
                WHERE i.download_playlist_id = download_playlists.id
                  AND i.selected = 1 AND i.status = 'pending'
            )",
     )
+    .bind(override_limits)
+    .bind(override_limits)
     .bind(&id)
     .bind(&user.principal_key)
+    .bind(override_limits)
     .execute(&state.pool)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1285,6 +1448,28 @@ pub(crate) async fn skip_playlist_cooldown_endpoint(
     fetch_summary(&state, &user.principal_key, &id)
         .await
         .map(Json)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkipCooldownRequest {
+    #[serde(default)]
+    pub override_limits: bool,
+}
+
+pub(crate) async fn get_playlist_download_settings_endpoint(
+    State(state): State<AppState>,
+) -> Json<PlaylistDownloadSettings> {
+    Json(load_playlist_download_settings(&state.pool).await)
+}
+
+pub(crate) async fn update_playlist_download_settings_endpoint(
+    State(state): State<AppState>,
+    Json(payload): Json<PlaylistDownloadSettings>,
+) -> Result<Json<PlaylistDownloadSettings>, StatusCode> {
+    save_playlist_download_settings(&state.pool, payload)
+        .await
+        .map(Json)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 pub(crate) async fn cancel_playlist_endpoint(
@@ -1519,10 +1704,52 @@ mod tests {
 
     #[test]
     fn long_videos_receive_a_longer_conservative_cooldown() {
-        let short = conservative_cooldown_seconds(Some(20 * 60_000));
-        let very_long = conservative_cooldown_seconds(Some(5 * 60 * 60_000));
-        assert!((3 * 60..=7 * 60).contains(&short));
-        assert!((30 * 60..=60 * 60).contains(&very_long));
+        let settings = PlaylistDownloadSettings::default();
+        let short = configured_cooldown_seconds(&settings, Some(20 * 60_000));
+        let very_long = configured_cooldown_seconds(&settings, Some(5 * 60 * 60_000));
+        assert!((180..=600).contains(&short));
+        assert!((1080..=3600).contains(&very_long));
+    }
+
+    #[test]
+    fn playlist_profiles_use_their_documented_cooldown_ranges() {
+        let conservative = PlaylistDownloadSettings::preset("conservative");
+        let balanced = PlaylistDownloadSettings::preset("balanced");
+        let fast = PlaylistDownloadSettings::preset("fast");
+        let custom = PlaylistDownloadSettings {
+            active_profile: "custom".into(),
+            min_cooldown_seconds: 20,
+            max_cooldown_seconds: 25,
+            dynamic_duration_cooldown: false,
+            daily_video_limit: None,
+            daily_gb_limit: None,
+            daily_limit_action: "ignore".into(),
+        };
+
+        assert!((180..=600).contains(&configured_cooldown_seconds(&conservative, None)));
+        assert!((45..=120).contains(&configured_cooldown_seconds(&balanced, None)));
+        assert!((5..=15).contains(&configured_cooldown_seconds(&fast, None)));
+        assert!((20..=25).contains(&configured_cooldown_seconds(&custom, None)));
+    }
+
+    #[tokio::test]
+    async fn playlist_settings_are_persisted_and_normalized() {
+        let pool = crate::db::connect("sqlite::memory:").await.unwrap();
+        let custom = PlaylistDownloadSettings {
+            active_profile: "custom".into(),
+            min_cooldown_seconds: 30,
+            max_cooldown_seconds: 10,
+            dynamic_duration_cooldown: false,
+            daily_video_limit: Some(0),
+            daily_gb_limit: Some(75),
+            daily_limit_action: "pause_and_notify".into(),
+        };
+        let saved = save_playlist_download_settings(&pool, custom)
+            .await
+            .unwrap();
+        assert_eq!(saved.max_cooldown_seconds, 30);
+        assert_eq!(saved.daily_video_limit, None);
+        assert_eq!(load_playlist_download_settings(&pool).await, saved);
     }
 
     #[test]

@@ -346,6 +346,11 @@ pub fn router_with_runtime(
             get(downloader::get_download_settings_endpoint)
                 .put(downloader::update_download_settings_endpoint),
         )
+        .route(
+            "/api/settings/playlist-downloads",
+            get(crate::download_playlists::get_playlist_download_settings_endpoint)
+                .put(crate::download_playlists::update_playlist_download_settings_endpoint),
+        )
         .route("/api/updates/status", get(get_update_status))
         .route("/api/updates/check", post(check_for_updates))
         .route("/api/updates/download", post(download_update))

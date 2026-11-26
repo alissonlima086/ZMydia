@@ -4,6 +4,7 @@
   import SettingsLanguage from './settings/SettingsLanguage.svelte';
   import SettingsFolders from './settings/SettingsFolders.svelte';
   import SettingsYoutube from './settings/SettingsYoutube.svelte';
+  import SettingsPlaylists from './settings/SettingsPlaylists.svelte';
   import SettingsSubtitles from './settings/SettingsSubtitles.svelte';
   import SettingsFeed from './settings/SettingsFeed.svelte';
   import SettingsExtension from './settings/SettingsExtension.svelte';
@@ -26,6 +27,7 @@
     { id: 'pastas', label: t('settings.tabs.folders'), icon: 'folder' },
     { id: 'feed', label: t('settings.tabs.feed'), icon: 'filter_alt' },
     { id: 'youtube', label: t('settings.tabs.youtube'), icon: 'smart_display' },
+    { id: 'playlists', label: t('settings.tabs.playlists'), icon: 'playlist_play' },
     { id: 'legendas', label: t('settings.tabs.subtitles'), icon: 'subtitles' },
     { id: 'extensao', label: t('settings.tabs.extension'), icon: 'extension' },
     { id: 'listenbrainz', label: t('settings.tabs.listenbrainz'), icon: 'album' }
@@ -62,6 +64,8 @@
         <SettingsFolders />
       {:else if activeTab === 'youtube'}
         <SettingsYoutube />
+      {:else if activeTab === 'playlists'}
+        <SettingsPlaylists />
       {:else if activeTab === 'legendas'}
         <SettingsSubtitles />
       {:else if activeTab === 'feed'}

@@ -135,7 +135,7 @@
   function getSettingsTabFromUrl(): string {
     if (typeof window === 'undefined') return 'dashboard';
     const tab = new URLSearchParams(window.location.search).get('tab');
-    const valid = ['dashboard', 'conta', 'idioma', 'pastas', 'youtube', 'legendas', 'feed', 'extensao', 'listenbrainz'];
+    const valid = ['dashboard', 'conta', 'idioma', 'pastas', 'youtube', 'playlists', 'legendas', 'feed', 'extensao', 'listenbrainz'];
     return tab && valid.includes(tab) ? tab : 'dashboard';
   }
 
