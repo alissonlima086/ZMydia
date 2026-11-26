@@ -279,6 +279,10 @@
     "/api/settings/listenbrainz/validate": [
       "POST"
     ],
+    "/api/settings/playlist-downloads": [
+      "GET",
+      "PUT"
+    ],
     "/api/settings/recommendation": [
       "GET",
       "PUT"
